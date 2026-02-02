@@ -57,6 +57,8 @@ type Server struct {
 
 	acceptSingleConn bool
 
+	onConnect func(remoteAddr string)
+
 	lock sync.Mutex
 }
 
@@ -144,6 +146,7 @@ type ServerConfig struct {
 	Xatrrs           bool
 	IgnoreSetAttrErr bool
 	AcceptSingleConn bool
+	OnConnect        func(remoteAddr string) // Called when a client connects
 }
 
 func NewServer(cfg *ServerConfig, a Authenticator, shares map[string]vfs.VFSFileSystem) *Server {
@@ -164,6 +167,7 @@ func NewServer(cfg *ServerConfig, a Authenticator, shares map[string]vfs.VFSFile
 		ignoreSetAttrErr: cfg.IgnoreSetAttrErr,
 		activeConns:      map[*conn]struct{}{},
 		acceptSingleConn: cfg.AcceptSingleConn,
+		onConnect:        cfg.OnConnect,
 	}
 	return srv
 }
@@ -193,6 +197,11 @@ func (d *Server) Serve(addr string) error {
 		c, err := listener.Accept()
 		if err != nil {
 			continue
+		}
+
+		// Call connection callback if set
+		if d.onConnect != nil {
+			d.onConnect(c.RemoteAddr().String())
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())

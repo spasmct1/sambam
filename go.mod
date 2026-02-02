@@ -10,4 +10,8 @@ require (
 	golang.org/x/exp v0.0.0-20230817173708-d852ddb80c63
 )
 
-require golang.org/x/sys v0.12.0 // indirect
+require (
+	github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0 // indirect
+	github.com/sevlyar/go-daemon v0.1.6 // indirect
+	golang.org/x/sys v0.12.0 // indirect
+)

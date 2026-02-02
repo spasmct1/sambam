@@ -25,6 +25,10 @@ type PassthroughFS struct {
 	rootPath  string
 	readOnly  bool
 	openFiles sync.Map
+
+	// Debug callbacks
+	OnCreate func(path string, isDir bool)
+	OnDelete func(path string)
 }
 
 func NewPassthroughFS(rootPath string, readOnly bool) *PassthroughFS {
@@ -133,6 +137,10 @@ func randHandle() uint64 {
 func (fs *PassthroughFS) Open(p string, flags int, mode int) (vfs.VfsHandle, error) {
 	fullPath := path.Join(fs.rootPath, p)
 
+	// Check if file exists before opening (to detect creation)
+	isCreate := flags&os.O_CREATE != 0
+	_, existedBefore := os.Stat(fullPath)
+
 	// If read-only, force read-only flags
 	if fs.readOnly {
 		flags = os.O_RDONLY
@@ -141,6 +149,11 @@ func (fs *PassthroughFS) Open(p string, flags int, mode int) (vfs.VfsHandle, err
 	f, err := os.OpenFile(fullPath, flags, os.FileMode(mode))
 	if err != nil {
 		return 0, err
+	}
+
+	// Call OnCreate if file was newly created
+	if isCreate && existedBefore != nil && fs.OnCreate != nil {
+		fs.OnCreate(p, false)
 	}
 
 	h := vfs.VfsHandle(randHandle())
@@ -189,6 +202,10 @@ func (fs *PassthroughFS) Mkdir(p string, mode int) (*vfs.Attributes, error) {
 	fullPath := path.Join(fs.rootPath, p)
 	if err := os.Mkdir(fullPath, os.FileMode(mode)); err != nil {
 		return nil, err
+	}
+
+	if fs.OnCreate != nil {
+		fs.OnCreate(p, true)
 	}
 
 	info, err := os.Stat(fullPath)
@@ -337,7 +354,15 @@ func (fs *PassthroughFS) Unlink(handle vfs.VfsHandle) error {
 	}
 	open := v.(*OpenFile)
 
-	return os.Remove(open.path)
+	// Get relative path for callback
+	relPath := strings.TrimPrefix(open.path, fs.rootPath)
+	relPath = strings.TrimPrefix(relPath, "/")
+
+	err := os.Remove(open.path)
+	if err == nil && fs.OnDelete != nil {
+		fs.OnDelete(relPath)
+	}
+	return err
 }
 
 func (fs *PassthroughFS) Truncate(handle vfs.VfsHandle, length uint64) error {
