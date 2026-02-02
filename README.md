@@ -36,11 +36,9 @@ Done. They open `\\your-ip\share` in Explorer. Files are flowing. You're a hero.
 
 ## Installation
 
-Download the latest release for your platform:
+Download the latest binary from the [Releases](https://git.tcjew.win/yaron/sambam/-/releases) page, then:
 
 ```bash
-# Linux AMD64
-curl -LO https://github.com/user/sambam/releases/latest/download/sambam-linux-amd64
 chmod +x sambam-linux-amd64
 sudo mv sambam-linux-amd64 /usr/local/bin/sambam
 ```
