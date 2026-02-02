@@ -123,7 +123,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		if fileExists {
 			log.Debugf("Open: already exists: %s", r.Name())
 			rsp := new(ErrorResponse)
-			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_OBJECT_NAME_EXISTS))
+			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_OBJECT_NAME_COLLISION))
 			return c.sendPacket(rsp, &t.treeConn, ctx)
 		}
 
@@ -153,7 +153,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		if fileExists {
 			action = FILE_SUPERSEDED
 		}
-		flags = os.O_CREATE
+		flags = os.O_CREATE | os.O_TRUNC
 	}
 
 	if err != nil {

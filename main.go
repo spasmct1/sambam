@@ -73,7 +73,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.2.1"
+	version = "1.2.2"
 )
 
 func main() {
@@ -132,9 +132,9 @@ func main() {
 		}
 	}
 
-	// Set log level - only show warnings/errors by default
+	// Set log level - show debug output when --debug is set
 	if *debugMode {
-		logrus.SetLevel(logrus.WarnLevel)
+		logrus.SetLevel(logrus.DebugLevel)
 	} else {
 		logrus.SetLevel(logrus.ErrorLevel)
 	}
