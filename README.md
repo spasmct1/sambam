@@ -1,6 +1,6 @@
 # sambam
 
-**The fastest way to share files with Windows.** No setup. No passwords. No patience required.
+**The fastest way to share files with Windows and macOS.** No setup. No passwords. No patience required.
 
 You know the drill: Your colleague needs a file. They're on Windows. You're on Linux. You could email it (if it's under 25MB). You could upload it to some cloud service (and wait). You could set up Samba (LOL, see you next week). Or...
 
@@ -32,8 +32,8 @@ Done. They open `\\your-ip\share` in Explorer. Files are flowing. You're a hero.
 - **Multiple shares** - Share multiple directories with different names
 - **Auto-expire** - Automatically stop sharing after a set time
 - **Config file** - Save your settings in `~/.sambamrc`
-- **Windows 11 compatible** - Full SMB2/3 protocol support
-- **Single binary** - Copy it anywhere, run it everywhere
+- **Cross-platform clients** - Works with Windows 10/11 and macOS
+- **Single binary** - Runs on any Linux distribution (Debian, Ubuntu, OpenWrt, etc.)
 - **Daemon mode** - Run in background, stop when done
 - **Pretty output** - Because life's too short for ugly terminals
 - **Debug logging** - See who's connecting and what they're doing
@@ -217,8 +217,8 @@ With `--debug` flag, see what's happening in real-time:
 ## Requirements
 
 - **Root privileges** - Port 445 requires root (or use `-l :8445` for non-standard port)
-- **Linux** - Tested on Debian 12, Ubuntu 22.04
-- **Windows client** - Windows 10/11 with SMB2/3
+- **Linux server** - Works on any distribution (Debian, Ubuntu, OpenWrt, Alpine, etc.)
+- **Clients** - Windows 10/11 or macOS (any version with SMB support)
 
 ## Security Notice
 
