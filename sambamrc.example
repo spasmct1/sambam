@@ -1,0 +1,23 @@
+# sambam configuration file
+# Place this file at ~/.sambamrc
+
+# Listen address (default: 0.0.0.0:445)
+listen = "0.0.0.0:445"
+
+# Read-only mode
+readonly = false
+
+# Debug mode - show connections and file activity
+debug = true
+
+# Authentication (optional)
+# username = "admin"
+# password = "secret123"
+
+# Auto-expire (optional)
+# expire = "30m"
+
+# Shares - map of share_name = "/path/to/folder"
+[shares]
+docs = "/tmp/docs"
+pics = "/tmp/pics"

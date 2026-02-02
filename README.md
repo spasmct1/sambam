@@ -29,6 +29,9 @@ Done. They open `\\your-ip\share` in Explorer. Files are flowing. You're a hero.
 - **Zero configuration** - No config files, no setup wizards, no existential dread
 - **Anonymous access** - No passwords by default (or add authentication if needed)
 - **Optional authentication** - Require username/password when you need it
+- **Multiple shares** - Share multiple directories with different names
+- **Auto-expire** - Automatically stop sharing after a set time
+- **Config file** - Save your settings in `~/.sambamrc`
 - **Windows 11 compatible** - Full SMB2/3 protocol support
 - **Single binary** - Copy it anywhere, run it everywhere
 - **Daemon mode** - Run in background, stop when done
@@ -62,6 +65,9 @@ sudo sambam /path/to/folder
 # Custom share name
 sudo sambam -n photos ~/Pictures
 
+# Multiple shares
+sudo sambam -n docs:/home/user/documents -n pics:/home/user/photos
+
 # Read-only (they can look, but not touch)
 sudo sambam -r /data
 
@@ -70,6 +76,9 @@ sudo sambam --username admin /data
 
 # Require authentication with specific password
 sudo sambam --username admin --password secret123 /data
+
+# Auto-expire after 30 minutes
+sudo sambam --expire 30m /data
 
 # Run as daemon (background)
 sudo sambam -d /data
@@ -87,11 +96,12 @@ sudo sambam -d --debug --username admin -L /var/log/sambam.log /data
 ## Options
 
 ```
--n, --name      Share name (default: "share")
+-n, --name      Share name or name:path (repeatable for multiple shares)
 -l, --listen    Listen address (default: "0.0.0.0:445")
 -r, --readonly  Read-only mode
 --username      Require authentication with this username
 --password      Password for authentication (random if not set)
+--expire        Auto-shutdown after duration (e.g., 30m, 1h, 2h30m)
 --debug         Show connections and file activity
 -d, --daemon    Run as background daemon
 -p, --pidfile   PID file location (default: "/tmp/sambam.pid")
@@ -100,12 +110,41 @@ sudo sambam -d --debug --username admin -L /var/log/sambam.log /data
 -h, --help      Show help
 ```
 
+## Configuration File
+
+You can save your settings in `~/.sambamrc` (TOML format):
+
+```toml
+# Listen address
+listen = "0.0.0.0:445"
+
+# Read-only mode
+readonly = false
+
+# Debug mode
+debug = true
+
+# Authentication
+username = "admin"
+password = "secret123"
+
+# Auto-expire
+expire = "1h"
+
+# Multiple shares
+[shares]
+docs = "/home/user/documents"
+pics = "/home/user/photos"
+```
+
+CLI flags override config file settings. See `sambamrc.example` for a full example.
+
 ## Connecting from Windows
 
 Once sambam is running, it shows you the exact path to use:
 
 ```
-  🔗 sambam v1.1.5
+  🔗 sambam v1.2.0
 
   Sharing      /home/user/documents
   Share        share
@@ -122,7 +161,7 @@ Once sambam is running, it shows you the exact path to use:
 With authentication enabled:
 
 ```
-  🔗 sambam v1.1.5
+  🔗 sambam v1.2.0
 
   Sharing      /home/user/documents
   Share        share

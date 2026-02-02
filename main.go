@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/pflag"
 
@@ -25,6 +26,38 @@ import (
 type Share struct {
 	Name string
 	Path string
+}
+
+// Config represents the ~/.sambamrc configuration file
+type Config struct {
+	Listen   string            `toml:"listen"`
+	Readonly bool              `toml:"readonly"`
+	Debug    bool              `toml:"debug"`
+	Username string            `toml:"username"`
+	Password string            `toml:"password"`
+	Expire   string            `toml:"expire"`
+	Shares   map[string]string `toml:"shares"`
+}
+
+// loadConfig loads configuration from ~/.sambamrc if it exists
+func loadConfig() *Config {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+
+	configPath := filepath.Join(home, ".sambamrc")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	var config Config
+	if _, err := toml.DecodeFile(configPath, &config); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Error reading %s: %v\n", configPath, err)
+		return nil
+	}
+
+	return &config
 }
 
 // generatePassword creates a random alphanumeric password
@@ -39,7 +72,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.1.5"
+	version = "1.2.0"
 )
 
 func main() {
@@ -48,6 +81,9 @@ func main() {
 		stopDaemon()
 		return
 	}
+
+	// Load config file
+	config := loadConfig()
 
 	// CLI flags
 	shareSpecs := pflag.StringArrayP("name", "n", []string{}, "Share specification (name:path or just name)")
@@ -73,6 +109,28 @@ func main() {
 
 	pflag.Parse()
 
+	// Apply config file values where CLI flags weren't explicitly set
+	if config != nil {
+		if !pflag.CommandLine.Changed("listen") && config.Listen != "" {
+			*listenAddr = config.Listen
+		}
+		if !pflag.CommandLine.Changed("readonly") && config.Readonly {
+			*readOnly = true
+		}
+		if !pflag.CommandLine.Changed("debug") && config.Debug {
+			*debugMode = true
+		}
+		if !pflag.CommandLine.Changed("username") && config.Username != "" {
+			*username = config.Username
+		}
+		if !pflag.CommandLine.Changed("password") && config.Password != "" {
+			*password = config.Password
+		}
+		if !pflag.CommandLine.Changed("expire") && config.Expire != "" {
+			*expireStr = config.Expire
+		}
+	}
+
 	if *showHelp {
 		printUsage()
 		os.Exit(0)
@@ -87,13 +145,29 @@ func main() {
 	var shares []Share
 	args := pflag.Args()
 
-	if len(*shareSpecs) == 0 {
-		// No -n flags: use positional arg or current dir
-		shareDir := "."
-		if len(args) > 0 {
-			shareDir = args[0]
+	if len(*shareSpecs) == 0 && len(args) == 0 {
+		// No -n flags and no positional arg: use config shares or current dir
+		if config != nil && len(config.Shares) > 0 {
+			for name, path := range config.Shares {
+				absPath, err := filepath.Abs(path)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error resolving path for '%s': %v\n", name, err)
+					os.Exit(1)
+				}
+				shares = append(shares, Share{Name: name, Path: absPath})
+			}
+		} else {
+			// Default: share current directory as "share"
+			absPath, err := filepath.Abs(".")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
+				os.Exit(1)
+			}
+			shares = append(shares, Share{Name: "share", Path: absPath})
 		}
-		absPath, err := filepath.Abs(shareDir)
+	} else if len(*shareSpecs) == 0 {
+		// No -n flags but have positional arg
+		absPath, err := filepath.Abs(args[0])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
 			os.Exit(1)
@@ -444,13 +518,8 @@ func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []
 		for _, ip := range displayIPs {
 			fmt.Printf("    %s\n", Cyan(fmt.Sprintf("\\\\%s%s\\%s", ip, portSuffix, share.Name)))
 		}
-		if len(shares) > 1 && len(displayIPs) > 0 {
-			fmt.Println()
-		}
 	}
-	if len(shares) == 1 {
-		fmt.Println()
-	}
+	fmt.Println()
 	if expireStr != "" {
 		fmt.Printf("  %s\n", Dim("Press Ctrl+C to stop, or wait for expiry"))
 		fmt.Println()
