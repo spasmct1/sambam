@@ -3,7 +3,9 @@ package smb2
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -11,6 +13,22 @@ import (
 	. "github.com/sambam/sambam/smb/internal/smb2"
 	log "github.com/sirupsen/logrus"
 )
+
+// isBenignError checks if an error is expected/normal (not worth logging as ERROR)
+func isNormalDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == io.EOF || err == context.Canceled {
+		return true
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "context canceled") ||
+		strings.Contains(errStr, "use of closed network connection") ||
+		strings.Contains(errStr, "no such user") ||
+		strings.Contains(errStr, "login failure")
+}
 
 type requestResponse struct {
 	msgId         uint64
@@ -122,9 +140,17 @@ type conn struct {
 
 func (conn *conn) shutdown() {
 	conn.cancel()
-	conn.wdone <- struct{}{}
-	conn.rdone <- struct{}{}
+	// Close transport first to unblock any pending reads/writes
 	conn.t.Close()
+	// Non-blocking send to signal goroutines (they may already be done)
+	select {
+	case conn.wdone <- struct{}{}:
+	default:
+	}
+	select {
+	case conn.rdone <- struct{}{}:
+	default:
+	}
 }
 
 func (conn *conn) useSession() bool {
@@ -305,7 +331,9 @@ exit:
 	case <-conn.rdone:
 		err = nil
 	default:
-		log.Errorln("error:", err)
+		if !isNormalDisconnect(err) {
+			log.Errorln("error:", err)
+		}
 	}
 
 	conn.m.Lock()

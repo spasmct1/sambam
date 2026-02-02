@@ -27,7 +27,8 @@ Done. They open `\\your-ip\share` in Explorer. Files are flowing. You're a hero.
 ## Features
 
 - **Zero configuration** - No config files, no setup wizards, no existential dread
-- **Anonymous access** - No passwords to forget (or share via sticky note)
+- **Anonymous access** - No passwords by default (or add authentication if needed)
+- **Optional authentication** - Require username/password when you need it
 - **Windows 11 compatible** - Full SMB2/3 protocol support
 - **Single binary** - Copy it anywhere, run it everywhere
 - **Daemon mode** - Run in background, stop when done
@@ -64,6 +65,12 @@ sudo sambam -n photos ~/Pictures
 # Read-only (they can look, but not touch)
 sudo sambam -r /data
 
+# Require authentication (generates random password)
+sudo sambam --username admin /data
+
+# Require authentication with specific password
+sudo sambam --username admin --password secret123 /data
+
 # Run as daemon (background)
 sudo sambam -d /data
 
@@ -71,10 +78,10 @@ sudo sambam -d /data
 sudo sambam stop
 
 # Debug mode (see connections and file activity)
-sudo sambam -D /data
+sudo sambam --debug /data
 
-# Daemon with logging
-sudo sambam -d -D -L /var/log/sambam.log /data
+# Daemon with logging and authentication
+sudo sambam -d --debug --username admin -L /var/log/sambam.log /data
 ```
 
 ## Options
@@ -83,7 +90,9 @@ sudo sambam -d -D -L /var/log/sambam.log /data
 -n, --name      Share name (default: "share")
 -l, --listen    Listen address (default: "0.0.0.0:445")
 -r, --readonly  Read-only mode
--D, --debug     Show connections and file activity
+--username      Require authentication with this username
+--password      Password for authentication (random if not set)
+--debug         Show connections and file activity
 -d, --daemon    Run as background daemon
 -p, --pidfile   PID file location (default: "/tmp/sambam.pid")
 -L, --logfile   Log file for daemon mode
@@ -96,16 +105,33 @@ sudo sambam -d -D -L /var/log/sambam.log /data
 Once sambam is running, it shows you the exact path to use:
 
 ```
-  🔗 sambam v1.1.0
+  🔗 sambam v1.1.5
 
   Sharing      /home/user/documents
   Share        share
   Listen       0.0.0.0:445
   Mode         read-write
+  Auth         anonymous
 
   Connect from Windows:
     \\192.168.1.100\share
-    \\10.0.0.5\share
+
+  Press Ctrl+C to stop
+```
+
+With authentication enabled:
+
+```
+  🔗 sambam v1.1.5
+
+  Sharing      /home/user/documents
+  Share        share
+  Listen       0.0.0.0:445
+  Mode         read-write
+  Auth         admin:xK9mQ2pL5n
+
+  Connect from Windows:
+    \\192.168.1.100\share
 
   Press Ctrl+C to stop
 ```
@@ -114,16 +140,33 @@ From Windows:
 1. Open **File Explorer**
 2. Type the path in the address bar: `\\192.168.1.100\share`
 3. Press Enter
-4. Profit
+4. If authentication is required, enter the username and password
 
-Or mount as a drive:
+Or mount as a drive with credentials:
 ```cmd
-net use Z: \\192.168.1.100\share
+net use Z: \\192.168.1.100\share /user:admin
 ```
+
+## Windows Credential Troubleshooting
+
+Windows caches SMB credentials. If you're having authentication issues:
+
+```cmd
+# List active connections
+net use
+
+# Disconnect a specific share
+net use \\192.168.1.100\share /delete
+
+# Or disconnect all shares
+net use * /delete
+```
+
+After clearing cached connections, reconnect and Windows will prompt for new credentials.
 
 ## Debug Output
 
-With `-D` flag, see what's happening in real-time:
+With `--debug` flag, see what's happening in real-time:
 
 ```
   15:04:05 connect 192.168.1.100:54321
@@ -140,13 +183,13 @@ With `-D` flag, see what's happening in real-time:
 
 ## Security Notice
 
-sambam uses anonymous/guest authentication. This means:
+By default, sambam uses anonymous/guest authentication. This means:
 
 - **No passwords** - Anyone on your network can access the share
 - **Use on trusted networks only** - Don't run this on public WiFi
 - **Not for production** - This is for quick file transfers, not Fort Knox
 
-When in doubt, use `-r` for read-only mode.
+For sensitive shares, use `--username` to require authentication, and `-r` for read-only mode.
 
 ## License
 

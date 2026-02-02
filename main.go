@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"os"
 	"os/signal"
@@ -18,8 +20,19 @@ import (
 	"github.com/sambam/sambam/smb/vfs"
 )
 
+// generatePassword creates a random alphanumeric password
+func generatePassword(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	result := make([]byte, length)
+	for i := range result {
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		result[i] = charset[n.Int64()]
+	}
+	return string(result)
+}
+
 var (
-	version = "1.1.0"
+	version = "1.1.5"
 )
 
 func main() {
@@ -42,7 +55,11 @@ func main() {
 	logFile := pflag.StringP("logfile", "L", "", "Log file path (daemon mode)")
 
 	// Debug flag
-	debugMode := pflag.BoolP("debug", "D", false, "Show client connections")
+	debugMode := pflag.Bool("debug", false, "Show client connections")
+
+	// Authentication flags
+	username := pflag.String("username", "", "Require authentication with this username")
+	password := pflag.String("password", "", "Password for authentication (random if not specified)")
 
 	pflag.Parse()
 
@@ -182,10 +199,23 @@ func main() {
 		}
 	}
 
-	// Create server with anonymous/guest authentication
+	// Setup authentication
+	userPassword := map[string]string{}
+	allowGuest := true
+	actualPassword := *password
+
+	if *username != "" {
+		allowGuest = false
+		if actualPassword == "" {
+			actualPassword = generatePassword(10)
+		}
+		userPassword[*username] = actualPassword
+	}
+
+	// Create server
 	srv := smb2.NewServer(
 		&smb2.ServerConfig{
-			AllowGuest: true,
+			AllowGuest: allowGuest,
 			OnConnect:  onConnect,
 		},
 		&smb2.NTLMAuthenticator{
@@ -194,8 +224,8 @@ func main() {
 			NbName:       hostname,
 			DnsName:      hostname + ".local",
 			DnsDomain:    ".local",
-			UserPassword: map[string]string{}, // No users = guest only
-			AllowGuest:   true,
+			UserPassword: userPassword,
+			AllowGuest:   allowGuest,
 		},
 		map[string]vfs.VFSFileSystem{*shareName: fs},
 	)
@@ -223,7 +253,7 @@ func main() {
 
 	// Print banner (skipped in daemon mode without logfile)
 	if !*daemonMode {
-		printBanner(absPath, *shareName, *readOnly, fullListenAddr, displayIPs, portSuffix)
+		printBanner(absPath, *shareName, *readOnly, fullListenAddr, displayIPs, portSuffix, *username, actualPassword)
 	}
 
 	// Start server in goroutine
@@ -251,7 +281,7 @@ func main() {
 	srv.Shutdown()
 }
 
-func printBanner(absPath, shareName string, readOnly bool, listenAddr string, displayIPs []string, portSuffix string) {
+func printBanner(absPath, shareName string, readOnly bool, listenAddr string, displayIPs []string, portSuffix string, username string, password string) {
 	fmt.Println()
 	fmt.Printf("  %s\n", CyanBold("🔗 sambam v"+version))
 	fmt.Println()
@@ -266,6 +296,13 @@ func printBanner(absPath, shareName string, readOnly bool, listenAddr string, di
 		modeStr = Green("read-write")
 	}
 	fmt.Printf("  %-12s %s\n", "Mode", modeStr)
+
+	if username != "" {
+		fmt.Printf("  %-12s %s\n", "Auth", Yellow(username)+Dim(":")+Yellow(password))
+	} else {
+		fmt.Printf("  %-12s %s\n", "Auth", Dim("anonymous"))
+	}
+
 	fmt.Println()
 	fmt.Println("  Connect from Windows:")
 	for _, ip := range displayIPs {
@@ -290,7 +327,9 @@ func printUsage() {
 	fmt.Printf("    %s, %s    Name of the SMB share %s\n", Green("-n"), Green("--name"), Dim("(default: share)"))
 	fmt.Printf("    %s, %s  Address to listen on %s\n", Green("-l"), Green("--listen"), Dim("(default: 0.0.0.0:445)"))
 	fmt.Printf("    %s, %s  Make share read-only\n", Green("-r"), Green("--readonly"))
-	fmt.Printf("    %s, %s   Show client connections\n", Green("-D"), Green("--debug"))
+	fmt.Printf("    %s    Require authentication\n", Green("--username"))
+	fmt.Printf("    %s    Password %s\n", Green("--password"), Dim("(random if not set)"))
+	fmt.Printf("    %s       Show connections and file activity\n", Green("--debug"))
 	fmt.Printf("    %s, %s  Run as background daemon\n", Green("-d"), Green("--daemon"))
 	fmt.Printf("    %s, %s  PID file location %s\n", Green("-p"), Green("--pidfile"), Dim("(default: /tmp/sambam.pid)"))
 	fmt.Printf("    %s, %s  Log file path (daemon mode)\n", Green("-L"), Green("--logfile"))
@@ -302,6 +341,7 @@ func printUsage() {
 	fmt.Printf("    %s    %s\n", Cyan("sambam /path/to/folder"), Dim("# Share specific directory"))
 	fmt.Printf("    %s       %s\n", Cyan("sambam -n myfiles ."), Dim("# Share with custom name"))
 	fmt.Printf("    %s           %s\n", Cyan("sambam -r /data"), Dim("# Read-only share"))
+	fmt.Printf("    %s  %s\n", Cyan("sambam --username admin /data"), Dim("# With authentication"))
 	fmt.Printf("    %s           %s\n", Cyan("sambam -d /data"), Dim("# Run as daemon"))
 	fmt.Printf("    %s               %s\n", Cyan("sambam stop"), Dim("# Stop running daemon"))
 	fmt.Println()

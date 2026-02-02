@@ -236,7 +236,9 @@ func (d *Server) Serve(addr string) error {
 
 		run := func() {
 			if err := conn.Run(); err != nil {
-				log.Errorf("err: %v", err)
+				if !isNormalDisconnect(err) {
+					log.Errorf("err: %v", err)
+				}
 				c.Close()
 				if d.acceptSingleConn {
 					d.active = false
