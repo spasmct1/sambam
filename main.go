@@ -16,6 +16,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/sevlyar/go-daemon"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
 
 	smb2 "github.com/sambam/sambam/smb/server"
@@ -72,7 +73,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.2.0"
+	version = "1.2.1"
 )
 
 func main() {
@@ -129,6 +130,13 @@ func main() {
 		if !pflag.CommandLine.Changed("expire") && config.Expire != "" {
 			*expireStr = config.Expire
 		}
+	}
+
+	// Set log level - only show warnings/errors by default
+	if *debugMode {
+		logrus.SetLevel(logrus.WarnLevel)
+	} else {
+		logrus.SetLevel(logrus.ErrorLevel)
 	}
 
 	if *showHelp {

@@ -701,23 +701,23 @@ func (t *fileTree) write(ctx *compoundContext, pkt []byte) error {
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
-	// async write
+	// Semi-synchronous write: send PENDING, wait for write slot, do write, respond
+	// This ensures writes complete before we return, preventing race with SetInfo
 	asyncId := randint64()
 	if ctx != nil || open.isEa {
 		return t.writeImpl(ctx, pkt, fileId, open, 0)
 	}
 
-	go func() {
-		t.ioWriteSem <- struct{}{}
-		defer func() { <-t.ioWriteSem }()
+	// Send PENDING response immediately
+	pendingRsp := new(ErrorResponse)
+	PrepareAsyncResponse(pendingRsp.Header(), pkt, asyncId, uint32(STATUS_PENDING))
+	c.sendPacket(pendingRsp, &t.treeConn, ctx)
 
-		rsp := new(ErrorResponse)
-		PrepareAsyncResponse(rsp.Header(), pkt, asyncId, uint32(STATUS_PENDING))
-		c.sendPacket(rsp, &t.treeConn, ctx)
+	// Wait for write slot and complete the write synchronously
+	t.ioWriteSem <- struct{}{}
+	defer func() { <-t.ioWriteSem }()
 
-		t.writeImpl(ctx, pkt, fileId, open, asyncId)
-	}()
-	return nil
+	return t.writeImpl(ctx, pkt, fileId, open, asyncId)
 }
 
 func (t *fileTree) writeImpl(ctx *compoundContext, pkt []byte, fileId *FileId, open *Open, asyncId uint64) error {
@@ -1741,6 +1741,22 @@ func (t *fileTree) setEndOfFileInfoEa(ctx *compoundContext, fileId *FileId, eaKe
 func (t *fileTree) setDispositionInfo(ctx *compoundContext, fileId *FileId, open *Open, pkt []byte) error {
 	c := t.session.conn
 
+	res, _ := accept(SMB2_SET_INFO, pkt)
+	r := SetInfoRequestDecoder(res)
+	info := FileDispositionInformationInfoDecoder(r.Buffer())
+
+	// Check if Windows wants to delete the file or clear the delete flag
+	deleteRequested := info.DeletePending() != 0
+	log.Debugf("setDispositionInfo: DeletePending=%d", info.DeletePending())
+
+	if !deleteRequested {
+		// Windows is clearing the delete flag
+		open.deleteAfterClose = false
+		rsp := new(SetInfoResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, 0)
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
+
 	attrs, err := t.fs.GetAttr(vfs.VfsHandle(fileId.HandleId()))
 	if err != nil {
 		log.Errorf("Delete failed to get attrs: %v", err)
@@ -1817,44 +1833,30 @@ func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) 
 	r := SetInfoRequestDecoder(res)
 	sd := SecurityDescriptorDecoder(r.Buffer())
 	daclBuf := sd.Dacl()
-	if daclBuf == nil {
-		rsp := new(ErrorResponse)
-		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
-		return c.sendPacket(rsp, &t.treeConn, ctx)
-	}
 
-	dacl := AclDecoder(daclBuf)
-	aceBuf := dacl.Aces()
-	foundNfsSid := false
-	for i := 0; i < int(dacl.AceCount()); i++ {
-		ace := AceDecoder(aceBuf)
-		sidBuf := ace.Sid()
-		sid := SidDecoder(sidBuf)
-		if sid.SubAuthorityCount() == 3 && sid.SubAuthority()[0] == 88 && sid.SubAuthority()[1] == 3 {
-			// NFS Mode Sid
-			foundNfsSid = true
-			mode := sid.SubAuthority()[2]
-
-			a := &vfs.Attributes{}
-			a.SetUnixMode(mode | 0600) // Owner can always read/write
-			if _, err := t.fs.SetAttr(vfs.VfsHandle(fileId.HandleId()), a); err != nil {
-				log.Errorf("SetAttr failed: %v", err)
-				rsp := new(ErrorResponse)
-				PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
-				return c.sendPacket(rsp, &t.treeConn, ctx)
+	// Try to extract NFS mode SID if DACL is present
+	if daclBuf != nil {
+		dacl := AclDecoder(daclBuf)
+		aceBuf := dacl.Aces()
+		for i := 0; i < int(dacl.AceCount()); i++ {
+			ace := AceDecoder(aceBuf)
+			sidBuf := ace.Sid()
+			sid := SidDecoder(sidBuf)
+			if sid.SubAuthorityCount() == 3 && sid.SubAuthority()[0] == 88 && sid.SubAuthority()[1] == 3 {
+				// NFS Mode Sid - try to apply Unix permissions
+				mode := sid.SubAuthority()[2]
+				a := &vfs.Attributes{}
+				a.SetUnixMode(mode | 0600) // Owner can always read/write
+				// Ignore errors - we still accept the security descriptor
+				t.fs.SetAttr(vfs.VfsHandle(fileId.HandleId()), a)
+				break
 			}
-			break
+			aceBuf = aceBuf[ace.Size():]
 		}
-
-		aceBuf = aceBuf[ace.Size():]
 	}
 
-	if !foundNfsSid {
-		rsp := new(ErrorResponse)
-		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
-		return c.sendPacket(rsp, &t.treeConn, ctx)
-	}
-
+	// Accept security descriptor even if we can't fully preserve NTFS ACLs
+	// This is necessary for Windows copy operations to succeed
 	rsp := &SetInfoResponse{}
 	PrepareResponse(&rsp.PacketHeader, pkt, 0)
 
@@ -1889,6 +1891,9 @@ func (t *fileTree) setInfo(ctx *compoundContext, pkt []byte) error {
 	}
 
 	log.Debugf("SetInfo: %d class", r.FileInfoClass())
+
+	// Flush any pending writes to ensure data is on disk before SetInfo
+	t.fs.Flush(vfs.VfsHandle(fileId.HandleId()))
 
 	switch r.InfoType() {
 	case SMB2_0_INFO_SECURITY:
