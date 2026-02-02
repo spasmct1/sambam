@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	version = "1.0.0"
+	version = "1.0.1"
 )
 
 func main() {
@@ -95,19 +95,37 @@ func main() {
 		map[string]vfs.VFSFileSystem{*shareName: fs},
 	)
 
-	// Get local IPs for display
-	localIPs := getLocalIPs()
+	// Parse listen address and add default port if needed
+	listenHost, listenPort := parseHostPort(*listenAddr)
+	if listenPort == "" {
+		listenPort = "445"
+	}
+	fullListenAddr := net.JoinHostPort(listenHost, listenPort)
+
+	// Get IPs for display
+	var displayIPs []string
+	if listenHost == "0.0.0.0" || listenHost == "" {
+		displayIPs = getLocalIPs()
+	} else {
+		displayIPs = []string{listenHost}
+	}
+
+	// Format connection string with port if non-standard
+	portSuffix := ""
+	if listenPort != "445" {
+		portSuffix = ":" + listenPort
+	}
 
 	fmt.Println("sambam - Instant SMB/CIFS file sharing")
 	fmt.Println("-------------------------------------------")
 	fmt.Printf("Sharing: %s\n", absPath)
 	fmt.Printf("Share name: %s\n", *shareName)
 	fmt.Printf("Read-only: %v\n", *readOnly)
-	fmt.Printf("Listening on: %s\n", *listenAddr)
+	fmt.Printf("Listening on: %s\n", fullListenAddr)
 	fmt.Println()
 	fmt.Println("Connect from Windows:")
-	for _, ip := range localIPs {
-		fmt.Printf("  \\\\%s\\%s\n", ip, *shareName)
+	for _, ip := range displayIPs {
+		fmt.Printf("  \\\\%s%s\\%s\n", ip, portSuffix, *shareName)
 	}
 	fmt.Println()
 	fmt.Println("Press Ctrl+C to stop")
@@ -115,7 +133,7 @@ func main() {
 
 	// Start server in goroutine
 	go func() {
-		if err := srv.Serve(*listenAddr); err != nil {
+		if err := srv.Serve(fullListenAddr); err != nil {
 			fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
 			os.Exit(1)
 		}
@@ -143,6 +161,16 @@ func printUsage() {
 	fmt.Println("  sambam /path/to/folder    # Share specific directory")
 	fmt.Println("  sambam -n myfiles .       # Share with custom name")
 	fmt.Println("  sambam -r /data           # Read-only share")
+}
+
+func parseHostPort(addr string) (host, port string) {
+	// Try to split as host:port
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port specified, treat entire string as host
+		return addr, ""
+	}
+	return host, port
 }
 
 func getLocalIPs() []string {
