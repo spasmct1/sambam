@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,12 @@ import (
 	smb2 "github.com/sambam/sambam/smb/server"
 	"github.com/sambam/sambam/smb/vfs"
 )
+
+// Share represents a named share with its path
+type Share struct {
+	Name string
+	Path string
+}
 
 // generatePassword creates a random alphanumeric password
 func generatePassword(length int) string {
@@ -43,7 +50,7 @@ func main() {
 	}
 
 	// CLI flags
-	shareName := pflag.StringP("name", "n", "share", "Name of the SMB share")
+	shareSpecs := pflag.StringArrayP("name", "n", []string{}, "Share specification (name:path or just name)")
 	listenAddr := pflag.StringP("listen", "l", "0.0.0.0:445", "Address to listen on")
 	readOnly := pflag.BoolP("readonly", "r", false, "Make share read-only")
 	showVersion := pflag.BoolP("version", "v", false, "Show version")
@@ -61,6 +68,9 @@ func main() {
 	username := pflag.String("username", "", "Require authentication with this username")
 	password := pflag.String("password", "", "Password for authentication (random if not specified)")
 
+	// Auto-expire flag
+	expireStr := pflag.String("expire", "", "Auto-shutdown after duration (e.g., 30m, 1h, 2h30m)")
+
 	pflag.Parse()
 
 	if *showHelp {
@@ -73,29 +83,59 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Determine directory to share
-	shareDir := "."
+	// Parse shares
+	var shares []Share
 	args := pflag.Args()
-	if len(args) > 0 {
-		shareDir = args[0]
+
+	if len(*shareSpecs) == 0 {
+		// No -n flags: use positional arg or current dir
+		shareDir := "."
+		if len(args) > 0 {
+			shareDir = args[0]
+		}
+		absPath, err := filepath.Abs(shareDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
+			os.Exit(1)
+		}
+		shares = append(shares, Share{Name: "share", Path: absPath})
+	} else {
+		// Parse each -n flag
+		for _, spec := range *shareSpecs {
+			var name, path string
+			if strings.Contains(spec, ":") {
+				parts := strings.SplitN(spec, ":", 2)
+				name = parts[0]
+				path = parts[1]
+			} else {
+				// Just a name, use positional arg or current dir
+				name = spec
+				if len(args) > 0 {
+					path = args[0]
+				} else {
+					path = "."
+				}
+			}
+			absPath, err := filepath.Abs(path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error resolving path for '%s': %v\n", name, err)
+				os.Exit(1)
+			}
+			shares = append(shares, Share{Name: name, Path: absPath})
+		}
 	}
 
-	// Resolve to absolute path
-	absPath, err := filepath.Abs(shareDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Verify directory exists
-	info, err := os.Stat(absPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "Error: %s is not a directory\n", absPath)
-		os.Exit(1)
+	// Verify all share directories exist
+	for _, share := range shares {
+		info, err := os.Stat(share.Path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "Error: %s is not a directory\n", share.Path)
+			os.Exit(1)
+		}
 	}
 
 	// Check if running as root (required for port 445)
@@ -149,35 +189,45 @@ func main() {
 
 		// Setup logging
 		if *logFile != "" {
-			log.Printf("sambam daemon started, sharing %s as %s", absPath, *shareName)
+			var shareNames []string
+			for _, s := range shares {
+				shareNames = append(shareNames, s.Name)
+			}
+			log.Printf("sambam daemon started, sharing: %s", strings.Join(shareNames, ", "))
 		}
 	}
 
-	// Create filesystem
-	fs := NewPassthroughFS(absPath, *readOnly)
+	// Create filesystems for all shares
+	vfsShares := make(map[string]vfs.VFSFileSystem)
+	for _, share := range shares {
+		fs := NewPassthroughFS(share.Path, *readOnly)
 
-	// Setup filesystem callbacks for debug mode
-	if *debugMode {
-		fs.OnCreate = func(path string, isDir bool) {
-			timestamp := time.Now().Format("15:04:05")
-			typeStr := "file"
-			if isDir {
-				typeStr = "dir"
+		// Setup filesystem callbacks for debug mode
+		if *debugMode {
+			shareName := share.Name // capture for closure
+			fs.OnCreate = func(path string, isDir bool) {
+				timestamp := time.Now().Format("15:04:05")
+				typeStr := "file"
+				if isDir {
+					typeStr = "dir"
+				}
+				if *daemonMode {
+					log.Printf("[%s] Created %s: %s", shareName, typeStr, path)
+				} else {
+					fmt.Printf("  %s %s %s %s %s\n", Dim(timestamp), Dim("["+shareName+"]"), Green("create"), Dim(typeStr), path)
+				}
 			}
-			if *daemonMode {
-				log.Printf("Created %s: %s", typeStr, path)
-			} else {
-				fmt.Printf("  %s %s %s %s\n", Dim(timestamp), Green("create"), Dim(typeStr), path)
+			fs.OnDelete = func(path string) {
+				timestamp := time.Now().Format("15:04:05")
+				if *daemonMode {
+					log.Printf("[%s] Deleted: %s", shareName, path)
+				} else {
+					fmt.Printf("  %s %s %s %s\n", Dim(timestamp), Dim("["+shareName+"]"), Red("delete"), path)
+				}
 			}
 		}
-		fs.OnDelete = func(path string) {
-			timestamp := time.Now().Format("15:04:05")
-			if *daemonMode {
-				log.Printf("Deleted: %s", path)
-			} else {
-				fmt.Printf("  %s %s %s\n", Dim(timestamp), Red("delete"), path)
-			}
-		}
+
+		vfsShares[share.Name] = fs
 	}
 
 	// Get hostname for NTLM
@@ -227,7 +277,7 @@ func main() {
 			UserPassword: userPassword,
 			AllowGuest:   allowGuest,
 		},
-		map[string]vfs.VFSFileSystem{*shareName: fs},
+		vfsShares,
 	)
 
 	// Parse listen address and add default port if needed
@@ -253,7 +303,7 @@ func main() {
 
 	// Print banner (skipped in daemon mode without logfile)
 	if !*daemonMode {
-		printBanner(absPath, *shareName, *readOnly, fullListenAddr, displayIPs, portSuffix, *username, actualPassword)
+		printBanner(shares, *readOnly, fullListenAddr, displayIPs, portSuffix, *username, actualPassword, *expireStr)
 	}
 
 	// Start server in goroutine
@@ -268,10 +318,57 @@ func main() {
 		}
 	}()
 
-	// Wait for interrupt
+	// Wait for interrupt or expiry
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	<-sigChan
+
+	// Setup expiry timer if specified
+	var expireTimer *time.Timer
+	var expireTime time.Time
+	if *expireStr != "" {
+		duration, err := time.ParseDuration(*expireStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid expire duration: %v\n", err)
+			os.Exit(1)
+		}
+		expireTime = time.Now().Add(duration)
+		expireTimer = time.NewTimer(duration)
+
+		// Start countdown display goroutine (only in foreground mode)
+		if !*daemonMode {
+			go func() {
+				ticker := time.NewTicker(1 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						remaining := time.Until(expireTime)
+						if remaining > 0 {
+							// Move cursor up and clear line, then print countdown
+							fmt.Printf("\r  %s %s   ", Dim("Expires in"), Yellow(formatDuration(remaining)))
+						}
+					case <-sigChan:
+						return
+					}
+				}
+			}()
+		}
+	}
+
+	// Wait for signal or expiry
+	if expireTimer != nil {
+		select {
+		case <-sigChan:
+		case <-expireTimer.C:
+			if *daemonMode && *logFile != "" {
+				log.Println("Expire time reached, shutting down...")
+			} else if !*daemonMode {
+				fmt.Println("\n\n  Time expired!")
+			}
+		}
+	} else {
+		<-sigChan
+	}
 
 	if *daemonMode && *logFile != "" {
 		log.Println("Shutting down...")
@@ -281,12 +378,50 @@ func main() {
 	srv.Shutdown()
 }
 
-func printBanner(absPath, shareName string, readOnly bool, listenAddr string, displayIPs []string, portSuffix string, username string, password string) {
+// formatDuration formats a duration as a human-readable string
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm %ds", h, m, s)
+	} else if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []string, portSuffix string, username string, password string, expireStr string) {
 	fmt.Println()
 	fmt.Printf("  %s\n", CyanBold("🔗 sambam v"+version))
 	fmt.Println()
-	fmt.Printf("  %-12s %s\n", "Sharing", Green(absPath))
-	fmt.Printf("  %-12s %s\n", "Share", Yellow(shareName))
+
+	// Show shares
+	if len(shares) == 1 {
+		fmt.Printf("  %-12s %s\n", "Sharing", Green(shares[0].Path))
+		fmt.Printf("  %-12s %s\n", "Share", Yellow(shares[0].Name))
+	} else {
+		// Find longest share name for alignment
+		maxLen := 0
+		for _, share := range shares {
+			if len(share.Name) > maxLen {
+				maxLen = len(share.Name)
+			}
+		}
+		if maxLen < 12 {
+			maxLen = 12
+		}
+		fmt.Printf("  %s\n", "Shares:")
+		for _, share := range shares {
+			padding := strings.Repeat(" ", maxLen-len(share.Name))
+			fmt.Printf("    %s%s %s %s\n", Yellow(share.Name), padding, Dim("→"), Green(share.Path))
+		}
+	}
+
 	fmt.Printf("  %-12s %s\n", "Listen", listenAddr)
 
 	modeStr := "read-write"
@@ -305,12 +440,26 @@ func printBanner(absPath, shareName string, readOnly bool, listenAddr string, di
 
 	fmt.Println()
 	fmt.Println("  Connect from Windows:")
-	for _, ip := range displayIPs {
-		fmt.Printf("    %s\n", Cyan(fmt.Sprintf("\\\\%s%s\\%s", ip, portSuffix, shareName)))
+	for _, share := range shares {
+		for _, ip := range displayIPs {
+			fmt.Printf("    %s\n", Cyan(fmt.Sprintf("\\\\%s%s\\%s", ip, portSuffix, share.Name)))
+		}
+		if len(shares) > 1 && len(displayIPs) > 0 {
+			fmt.Println()
+		}
 	}
-	fmt.Println()
-	fmt.Printf("  %s\n", Dim("Press Ctrl+C to stop"))
-	fmt.Println()
+	if len(shares) == 1 {
+		fmt.Println()
+	}
+	if expireStr != "" {
+		fmt.Printf("  %s\n", Dim("Press Ctrl+C to stop, or wait for expiry"))
+		fmt.Println()
+		// Initial expires line - no newline so countdown can overwrite
+		fmt.Printf("  %s %s   ", Dim("Expires in"), Yellow(expireStr))
+	} else {
+		fmt.Printf("  %s\n", Dim("Press Ctrl+C to stop"))
+		fmt.Println()
+	}
 }
 
 func printUsage() {
@@ -324,26 +473,29 @@ func printUsage() {
 	fmt.Printf("    %s\n", Cyan("sambam stop"))
 	fmt.Println()
 	fmt.Println(Bold("  Options:"))
-	fmt.Printf("    %s, %s    Name of the SMB share %s\n", Green("-n"), Green("--name"), Dim("(default: share)"))
-	fmt.Printf("    %s, %s  Address to listen on %s\n", Green("-l"), Green("--listen"), Dim("(default: 0.0.0.0:445)"))
-	fmt.Printf("    %s, %s  Make share read-only\n", Green("-r"), Green("--readonly"))
-	fmt.Printf("    %s    Require authentication\n", Green("--username"))
-	fmt.Printf("    %s    Password %s\n", Green("--password"), Dim("(random if not set)"))
-	fmt.Printf("    %s       Show connections and file activity\n", Green("--debug"))
-	fmt.Printf("    %s, %s  Run as background daemon\n", Green("-d"), Green("--daemon"))
-	fmt.Printf("    %s, %s  PID file location %s\n", Green("-p"), Green("--pidfile"), Dim("(default: /tmp/sambam.pid)"))
-	fmt.Printf("    %s, %s  Log file path (daemon mode)\n", Green("-L"), Green("--logfile"))
-	fmt.Printf("    %s, %s  Show version\n", Green("-v"), Green("--version"))
-	fmt.Printf("    %s, %s    Show help\n", Green("-h"), Green("--help"))
+	fmt.Printf("    %s, %s      %s\n", Green("-n"), Green("--name"), "Share name or name:path "+Dim("(repeatable)"))
+	fmt.Printf("    %s, %s    %s\n", Green("-l"), Green("--listen"), "Address to listen on "+Dim("(default: 0.0.0.0:445)"))
+	fmt.Printf("    %s, %s  %s\n", Green("-r"), Green("--readonly"), "Make share read-only")
+	fmt.Printf("        %s  %s\n", Green("--username"), "Require authentication")
+	fmt.Printf("        %s  %s\n", Green("--password"), "Password "+Dim("(random if not set)"))
+	fmt.Printf("        %s    %s\n", Green("--expire"), "Auto-shutdown after duration "+Dim("(e.g., 30m, 1h)"))
+	fmt.Printf("        %s     %s\n", Green("--debug"), "Show connections and file activity")
+	fmt.Printf("    %s, %s    %s\n", Green("-d"), Green("--daemon"), "Run as background daemon")
+	fmt.Printf("    %s, %s   %s\n", Green("-p"), Green("--pidfile"), "PID file location "+Dim("(default: /tmp/sambam.pid)"))
+	fmt.Printf("    %s, %s   %s\n", Green("-L"), Green("--logfile"), "Log file path (daemon mode)")
+	fmt.Printf("    %s, %s   %s\n", Green("-v"), Green("--version"), "Show version")
+	fmt.Printf("    %s, %s      %s\n", Green("-h"), Green("--help"), "Show help")
 	fmt.Println()
 	fmt.Println(Bold("  Examples:"))
-	fmt.Printf("    %s                    %s\n", Cyan("sambam"), Dim("# Share current directory"))
-	fmt.Printf("    %s    %s\n", Cyan("sambam /path/to/folder"), Dim("# Share specific directory"))
-	fmt.Printf("    %s       %s\n", Cyan("sambam -n myfiles ."), Dim("# Share with custom name"))
-	fmt.Printf("    %s           %s\n", Cyan("sambam -r /data"), Dim("# Read-only share"))
-	fmt.Printf("    %s  %s\n", Cyan("sambam --username admin /data"), Dim("# With authentication"))
-	fmt.Printf("    %s           %s\n", Cyan("sambam -d /data"), Dim("# Run as daemon"))
-	fmt.Printf("    %s               %s\n", Cyan("sambam stop"), Dim("# Stop running daemon"))
+	fmt.Printf("    %s  %s\n", Cyan("sambam")+"                              ", Dim("# Share current directory as 'share'"))
+	fmt.Printf("    %s  %s\n", Cyan("sambam /path/to/folder")+"              ", Dim("# Share specific directory"))
+	fmt.Printf("    %s  %s\n", Cyan("sambam -n myfiles .")+"                 ", Dim("# Share current dir as 'myfiles'"))
+	fmt.Printf("    %s  %s\n", Cyan("sambam -n docs:/docs -n pics:/photos"), Dim("# Multiple shares"))
+	fmt.Printf("    %s  %s\n", Cyan("sambam -r /data")+"                     ", Dim("# Read-only share"))
+	fmt.Printf("    %s  %s\n", Cyan("sambam --username admin /data")+"       ", Dim("# With authentication"))
+	fmt.Printf("    %s  %s\n", Cyan("sambam --expire 30m /data")+"           ", Dim("# Auto-stop after 30 minutes"))
+	fmt.Printf("    %s  %s\n", Cyan("sambam -d /data")+"                     ", Dim("# Run as daemon"))
+	fmt.Printf("    %s  %s\n", Cyan("sambam stop")+"                         ", Dim("# Stop running daemon"))
 	fmt.Println()
 }
 
