@@ -36,12 +36,10 @@ Done. They open `\\your-ip\share` in Explorer. Files are flowing. You're a hero.
 - **Cross-platform clients** - Works with Windows 10/11 and macOS
 - **Single binary** - Runs on any Linux distribution (Debian, Ubuntu, OpenWrt, etc.)
 - **Daemon mode** - Run in background, stop when done
-- **Pretty output** - Because life's too short for ugly terminals
-- **Debug logging** - See who's connecting and what they're doing
 
 ## Installation
 
-Download the latest binary from the [Releases](https://git.tcjew.win/yaron/sambam/-/releases) page, then:
+Download the latest binary from the [Releases](https://github.com/darkpenguin23/sambam/releases) page, then: 
 
 ```bash
 chmod +x sambam-linux-amd64
