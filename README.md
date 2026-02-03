@@ -235,5 +235,5 @@ For sensitive shares, use `--username` to require authentication, and `-r` for r
 AGPL-3.0
 
 ---
-
+*Idea and design by a human, programming by an AI*
 *Made for those moments when you just need to share a damn file.*
