@@ -93,6 +93,9 @@ sudo sambam --debug /data
 sudo sambam -d --debug --username admin -L /var/log/sambam.log /data
 ```
 
+[![asciicast](https://asciinema.tcjew.win/a/42.svg)](https://asciinema.tcjew.win/a/42)
+
+
 ## Options
 
 ```
