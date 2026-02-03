@@ -9,8 +9,9 @@ sudo sambam /path/to/folder
 ```
 
 Done. They open `\\your-ip\share` in Explorer. Files are flowing. You're a hero.
-
 **sambam** is like `python -m http.server` but for Windows network shares. One command, instant SMB file sharing.
+
+![Demo](demo.gif)
 
 ## Why sambam?
 
@@ -93,7 +94,7 @@ sudo sambam --debug /data
 sudo sambam -d --debug --username admin -L /var/log/sambam.log /data
 ```
 
-[![asciicast](https://asciinema.tcjew.win/a/42.svg)](https://asciinema.tcjew.win/a/42)
+
 
 
 ## Options
