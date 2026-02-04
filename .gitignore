@@ -13,3 +13,6 @@ quickshare
 .DS_Store
 Thumbs.db
 *.zip
+
+# Release config (contains tokens)
+.release-config
