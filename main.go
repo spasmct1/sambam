@@ -73,7 +73,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.2.3"
+	version = "1.2.4"
 )
 
 func main() {
@@ -148,7 +148,7 @@ func main() {
 	}
 
 	if *showVersion {
-		fmt.Printf("sambam %s\n", version)
+		fmt.Printf("sambam %s (built with AI assistance)\n", version)
 		os.Exit(0)
 	}
 
@@ -541,11 +541,12 @@ func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []
 		fmt.Printf("  %s\n", Dim("Press Ctrl+C to stop"))
 		fmt.Println()
 	}
+	fmt.Printf("  %s\n", Dim("Built with AI assistance"))
 }
 
 func printUsage() {
 	fmt.Println()
-	fmt.Printf("  %s\n", CyanBold("🔗 sambam v"+version))
+	fmt.Printf("  %s %s\n", CyanBold("🔗 sambam v"+version), Dim("(built with AI assistance)"))
 	fmt.Println()
 	fmt.Println(Dim("  Instant SMB/CIFS file sharing for Windows clients"))
 	fmt.Println()

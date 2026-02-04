@@ -2,6 +2,8 @@
 
 **The fastest way to share files with Windows and macOS.** No setup. No passwords. No patience required.
 
+> 🤖 **Built with AI assistance** — Idea and design by a human, code by an AI. Fully open source and auditable.
+
 You know the drill: Your colleague needs a file. They're on Windows. You're on Linux. You could email it (if it's under 25MB). You could upload it to some cloud service (and wait). You could set up Samba (LOL, see you next week). Or...
 
 ```bash
@@ -241,5 +243,4 @@ For sensitive shares, use `--username` to require authentication, and `-r` for r
 AGPL-3.0
 
 ---
-*Idea and design by a human, programming by an AI*
 *Made for those moments when you just need to share a damn file.*
