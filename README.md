@@ -88,6 +88,9 @@ sudo sambam stop
 # Debug mode (see connections and file activity)
 sudo sambam --debug /data
 
+# Hide dotfiles (files starting with '.')
+sudo sambam --hide-dotfiles /data
+
 # Daemon with logging and authentication
 sudo sambam -d --debug --username admin -L /var/log/sambam.log /data
 ```
@@ -98,18 +101,19 @@ sudo sambam -d --debug --username admin -L /var/log/sambam.log /data
 ## Options
 
 ```
--n, --name      Share name or name:path (repeatable for multiple shares)
--l, --listen    Listen address (default: "0.0.0.0:445")
--r, --readonly  Read-only mode
---username      Require authentication with this username
---password      Password for authentication (random if not set)
---expire        Auto-shutdown after duration (e.g., 30m, 1h, 2h30m)
---debug         Show connections and file activity
--d, --daemon    Run as background daemon
--p, --pidfile   PID file location (default: "/tmp/sambam.pid")
--L, --logfile   Log file for daemon mode
--v, --version   Show version
--h, --help      Show help
+-n, --name       Share name or name:path (repeatable for multiple shares)
+-l, --listen     Listen address (default: "0.0.0.0:445")
+-r, --readonly   Read-only mode
+--username       Require authentication with this username
+--password       Password for authentication (random if not set)
+--expire         Auto-shutdown after duration (e.g., 30m, 1h, 2h30m)
+--debug          Show connections and file activity
+--hide-dotfiles  Hide files starting with '.' (visible by default)
+-d, --daemon     Run as background daemon
+-p, --pidfile    PID file location (default: "/tmp/sambam.pid")
+-L, --logfile    Log file for daemon mode
+-v, --version    Show version
+-h, --help       Show help
 ```
 
 ## Configuration File
