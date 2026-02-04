@@ -53,6 +53,8 @@ type Server struct {
 
 	ignoreSetAttrErr bool
 
+	hideDotfiles bool
+
 	activeConns map[*conn]struct{}
 
 	acceptSingleConn bool
@@ -146,6 +148,7 @@ type ServerConfig struct {
 	Xatrrs           bool
 	IgnoreSetAttrErr bool
 	AcceptSingleConn bool
+	HideDotfiles     bool                    // Hide files starting with '.'
 	OnConnect        func(remoteAddr string) // Called when a client connects
 }
 
@@ -165,6 +168,7 @@ func NewServer(cfg *ServerConfig, a Authenticator, shares map[string]vfs.VFSFile
 		maxIOWrites:      cfg.MaxIOWrites,
 		xattrs:           cfg.Xatrrs,
 		ignoreSetAttrErr: cfg.IgnoreSetAttrErr,
+		hideDotfiles:     cfg.HideDotfiles,
 		activeConns:      map[*conn]struct{}{},
 		acceptSingleConn: cfg.AcceptSingleConn,
 		onConnect:        cfg.OnConnect,

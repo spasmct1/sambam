@@ -73,7 +73,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.2.2"
+	version = "1.2.3"
 )
 
 func main() {
@@ -100,6 +100,9 @@ func main() {
 
 	// Debug flag
 	debugMode := pflag.Bool("debug", false, "Show client connections")
+
+	// Hidden files flag
+	hideDotfiles := pflag.Bool("hide-dotfiles", false, "Hide files starting with '.'")
 
 	// Authentication flags
 	username := pflag.String("username", "", "Require authentication with this username")
@@ -347,8 +350,9 @@ func main() {
 	// Create server
 	srv := smb2.NewServer(
 		&smb2.ServerConfig{
-			AllowGuest: allowGuest,
-			OnConnect:  onConnect,
+			AllowGuest:   allowGuest,
+			HideDotfiles: *hideDotfiles,
+			OnConnect:    onConnect,
 		},
 		&smb2.NTLMAuthenticator{
 			TargetSPN:    "",
@@ -557,6 +561,7 @@ func printUsage() {
 	fmt.Printf("        %s  %s\n", Green("--password"), "Password "+Dim("(random if not set)"))
 	fmt.Printf("        %s    %s\n", Green("--expire"), "Auto-shutdown after duration "+Dim("(e.g., 30m, 1h)"))
 	fmt.Printf("        %s     %s\n", Green("--debug"), "Show connections and file activity")
+	fmt.Printf("        %s\n", Green("--hide-dotfiles")+"  Hide files starting with '.'")
 	fmt.Printf("    %s, %s    %s\n", Green("-d"), Green("--daemon"), "Run as background daemon")
 	fmt.Printf("    %s, %s   %s\n", Green("-p"), Green("--pidfile"), "PID file location "+Dim("(default: /tmp/sambam.pid)"))
 	fmt.Printf("    %s, %s   %s\n", Green("-L"), Green("--logfile"), "Log file path (daemon mode)")

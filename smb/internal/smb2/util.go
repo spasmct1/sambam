@@ -140,12 +140,13 @@ func DiskSizeFromVfs(a *vfs.Attributes) uint64 {
 	return SizeFromVfs(a)
 }
 
-func PermissionsFromVfs(a *vfs.Attributes, path string) uint32 {
+func PermissionsFromVfs(a *vfs.Attributes, path string, hideDotfiles bool) uint32 {
 	perm := uint32(0)
-	name := filepath.Base(path)
-	if len(name) > 0 && name[0] == '.' {
-		perm |= FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE
-		//return perm
+	if hideDotfiles {
+		name := filepath.Base(path)
+		if len(name) > 0 && name[0] == '.' {
+			perm |= FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE
+		}
 	}
 	if p, ok := a.GetPermissions(); ok {
 		if p&vfs.PermissionsWrite == 0 && p&vfs.PermissionsRead == 0 && p&vfs.PermissionsExecute == 0 {

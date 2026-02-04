@@ -228,7 +228,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 
 	rsp.OplockLevel = lockLevel
 	rsp.CreateAction = uint32(action)
-	rsp.FileAttributes = PermissionsFromVfs(attrs, name)
+	rsp.FileAttributes = PermissionsFromVfs(attrs, name, t.conn.serverCtx.hideDotfiles)
 	rsp.CreationTime = BirthTimeFromVfs(attrs)
 	rsp.LastAccessTime = AccessTimeFromVfs(attrs)
 	rsp.LastWriteTime = ModifiedTimeFromVfs(attrs)
@@ -501,7 +501,7 @@ func (t *fileTree) close(ctx *compoundContext, pkt []byte) error {
 		rsp.ChangeTime = ChangeTimeFromVfs(a)
 		rsp.EndofFile = int64(SizeFromVfs(a))
 		rsp.AllocationSize = int64(DiskSizeFromVfs(a))
-		rsp.FileAttributes = PermissionsFromVfs(a, open.pathName)
+		rsp.FileAttributes = PermissionsFromVfs(a, open.pathName, t.conn.serverCtx.hideDotfiles)
 	}
 send:
 	if open != nil && open.deleteAfterClose {
@@ -958,7 +958,7 @@ func (t *fileTree) cancel(ctx *compoundContext, pkt []byte) error {
 	return c.sendPacket(rsp, &t.treeConn, ctx)
 }
 
-func newFileDirectoryInformationInfo(d vfs.DirInfo) FileDirectoryInformationInfo {
+func newFileDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) FileDirectoryInformationInfo {
 	info := FileDirectoryInformationInfo{
 		FileIndex: 0,
 		FileName:  d.Name,
@@ -970,11 +970,11 @@ func newFileDirectoryInformationInfo(d vfs.DirInfo) FileDirectoryInformationInfo
 	info.ChangeTime = *ChangeTimeFromVfs(&d.Attributes)
 	info.EndOfFile = SizeFromVfs(&d.Attributes)
 	info.AllocationSize = DiskSizeFromVfs(&d.Attributes)
-	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name)
+	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name, hideDotfiles)
 	return info
 }
 
-func newFileFullDirectoryInformationInfo(d vfs.DirInfo) FileFullDirectoryInformationInfo {
+func newFileFullDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) FileFullDirectoryInformationInfo {
 	info := FileFullDirectoryInformationInfo{
 		FileIndex: 0,
 		FileName:  d.Name,
@@ -986,14 +986,14 @@ func newFileFullDirectoryInformationInfo(d vfs.DirInfo) FileFullDirectoryInforma
 	info.ChangeTime = *ChangeTimeFromVfs(&d.Attributes)
 	info.EndOfFile = SizeFromVfs(&d.Attributes)
 	info.AllocationSize = DiskSizeFromVfs(&d.Attributes)
-	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name)
+	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name, hideDotfiles)
 	if info.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		info.EaSize = IO_REPARSE_TAG_SYMLINK
 	}
 	return info
 }
 
-func newFileIdFullDirectoryInformationInfo(d vfs.DirInfo) FileIdFullDirectoryInformationInfo {
+func newFileIdFullDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) FileIdFullDirectoryInformationInfo {
 	info := FileIdFullDirectoryInformationInfo{
 		FileIndex: 0,
 		FileName:  d.Name,
@@ -1005,14 +1005,14 @@ func newFileIdFullDirectoryInformationInfo(d vfs.DirInfo) FileIdFullDirectoryInf
 	info.ChangeTime = *ChangeTimeFromVfs(&d.Attributes)
 	info.EndOfFile = SizeFromVfs(&d.Attributes)
 	info.AllocationSize = DiskSizeFromVfs(&d.Attributes)
-	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name)
+	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name, hideDotfiles)
 	if info.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		info.EaSize = IO_REPARSE_TAG_SYMLINK
 	}
 	return info
 }
 
-func newFileIdBothDirectoryInformationInfo(d vfs.DirInfo) FileIdBothDirectoryInformationInfo {
+func newFileIdBothDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) FileIdBothDirectoryInformationInfo {
 	info := FileIdBothDirectoryInformationInfo{
 		FileIndex: 0,
 		FileName:  d.Name,
@@ -1025,7 +1025,7 @@ func newFileIdBothDirectoryInformationInfo(d vfs.DirInfo) FileIdBothDirectoryInf
 	info.ChangeTime = *ChangeTimeFromVfs(&d.Attributes)
 	info.EndOfFile = SizeFromVfs(&d.Attributes)
 	info.AllocationSize = DiskSizeFromVfs(&d.Attributes)
-	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name)
+	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name, hideDotfiles)
 
 	if info.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		info.EaSize = IO_REPARSE_TAG_SYMLINK
@@ -1034,7 +1034,7 @@ func newFileIdBothDirectoryInformationInfo(d vfs.DirInfo) FileIdBothDirectoryInf
 	return info
 }
 
-func newFileBothDirectoryInformationInfo(d vfs.DirInfo) FileBothDirectoryInformationInfo {
+func newFileBothDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) FileBothDirectoryInformationInfo {
 	info := FileBothDirectoryInformationInfo{
 		FileIndex: 0,
 		FileName:  d.Name,
@@ -1046,7 +1046,7 @@ func newFileBothDirectoryInformationInfo(d vfs.DirInfo) FileBothDirectoryInforma
 	info.ChangeTime = *ChangeTimeFromVfs(&d.Attributes)
 	info.EndOfFile = SizeFromVfs(&d.Attributes)
 	info.AllocationSize = DiskSizeFromVfs(&d.Attributes)
-	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name)
+	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name, hideDotfiles)
 
 	if info.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		info.EaSize = IO_REPARSE_TAG_SYMLINK
@@ -1055,7 +1055,7 @@ func newFileBothDirectoryInformationInfo(d vfs.DirInfo) FileBothDirectoryInforma
 	return info
 }
 
-func newFileIdAllExtdBothDirectoryInformationInfo(d vfs.DirInfo) FileIdAllExtdBothDirectoryInformationInfo {
+func newFileIdAllExtdBothDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) FileIdAllExtdBothDirectoryInformationInfo {
 	info := FileIdAllExtdBothDirectoryInformationInfo{
 		FileIndex: 0,
 		FileName:  d.Name,
@@ -1068,7 +1068,7 @@ func newFileIdAllExtdBothDirectoryInformationInfo(d vfs.DirInfo) FileIdAllExtdBo
 	info.ChangeTime = *ChangeTimeFromVfs(&d.Attributes)
 	info.EndOfFile = SizeFromVfs(&d.Attributes)
 	info.AllocationSize = DiskSizeFromVfs(&d.Attributes)
-	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name)
+	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name, hideDotfiles)
 
 	if info.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		info.EaSize = IO_REPARSE_TAG_SYMLINK
@@ -1077,7 +1077,7 @@ func newFileIdAllExtdBothDirectoryInformationInfo(d vfs.DirInfo) FileIdAllExtdBo
 	return info
 }
 
-func newFileIdBothDirectoryInformationInfo2(d vfs.DirInfo) FileIdBothDirectoryInformationInfo2 {
+func newFileIdBothDirectoryInformationInfo2(d vfs.DirInfo, hideDotfiles bool) FileIdBothDirectoryInformationInfo2 {
 	info := FileIdBothDirectoryInformationInfo2{
 		FileIndex: 0,
 		MaxAccess: MaxAccessFromVfs(&d.Attributes),
@@ -1092,7 +1092,7 @@ func newFileIdBothDirectoryInformationInfo2(d vfs.DirInfo) FileIdBothDirectoryIn
 	info.ChangeTime = *ChangeTimeFromVfs(&d.Attributes)
 	info.EndOfFile = SizeFromVfs(&d.Attributes)
 	info.AllocationSize = DiskSizeFromVfs(&d.Attributes)
-	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name)
+	info.FileAttributes = PermissionsFromVfs(&d.Attributes, d.Name, hideDotfiles)
 
 	if info.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		info.MaxAccess = IO_REPARSE_TAG_SYMLINK
@@ -1109,24 +1109,25 @@ func newFileNamesInformationInfo(d vfs.DirInfo) FileNamesInformationInfo {
 }
 
 func (t *fileTree) makeItem(class uint8, d vfs.DirInfo) Encoder {
+	hideDotfiles := t.conn.serverCtx.hideDotfiles
 	switch class {
 	case FileBothDirectoryInformation:
-		return newFileBothDirectoryInformationInfo(d)
+		return newFileBothDirectoryInformationInfo(d, hideDotfiles)
 	case FileNamesInformation:
 		return newFileNamesInformationInfo(d)
 	case FileIdBothDirectoryInformation:
 		if t.aaplExtensions {
-			return newFileIdBothDirectoryInformationInfo2(d)
+			return newFileIdBothDirectoryInformationInfo2(d, hideDotfiles)
 		}
-		return newFileIdBothDirectoryInformationInfo(d)
+		return newFileIdBothDirectoryInformationInfo(d, hideDotfiles)
 	case FileDirectoryInformation:
-		return newFileDirectoryInformationInfo(d)
+		return newFileDirectoryInformationInfo(d, hideDotfiles)
 	case FileFullDirectoryInformation:
-		return newFileFullDirectoryInformationInfo(d)
+		return newFileFullDirectoryInformationInfo(d, hideDotfiles)
 	case FileIdFullDirectoryInformation:
-		return newFileIdFullDirectoryInformationInfo(d)
+		return newFileIdFullDirectoryInformationInfo(d, hideDotfiles)
 	case FileIdAllExtdBothDirectoryInformation:
-		return newFileIdAllExtdBothDirectoryInformationInfo(d)
+		return newFileIdAllExtdBothDirectoryInformationInfo(d, hideDotfiles)
 	default:
 		log.Warningf("bad info class %d", class)
 	}
@@ -1450,7 +1451,7 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 				LastAccessTime: *AccessTimeFromVfs(a),
 				LastWriteTime:  *ModifiedTimeFromVfs(a),
 				ChangeTime:     *ChangeTimeFromVfs(a),
-				FileAttributes: PermissionsFromVfs(a, open.pathName),
+				FileAttributes: PermissionsFromVfs(a, open.pathName, t.conn.serverCtx.hideDotfiles),
 			},
 			StandardInformation: FileStandardInformationInfo{
 				EndOfFile:      int64(SizeFromVfs(a)),
@@ -1514,7 +1515,7 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 				ChangeTime:     *ChangeTimeFromVfs(a),
 				AllocationSize: int64(DiskSizeFromVfs(a)),
 				EndOfFile:      int64(SizeFromVfs(a)),
-				FileAttributes: PermissionsFromVfs(a, open.pathName),
+				FileAttributes: PermissionsFromVfs(a, open.pathName, t.conn.serverCtx.hideDotfiles),
 			}
 		} else {
 			len, _ := t.fs.Getxattr(vfs.VfsHandle(fileId.HandleId()), open.eaKey, nil)
