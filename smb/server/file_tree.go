@@ -1179,6 +1179,11 @@ func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
 	}
 
 	name := r.FileName()
+	maxOutBytes := int(r.OutputBufferLength())
+	if maxOutBytes == 0 {
+		maxOutBytes = 65536
+	}
+
 	if Status == 0 {
 		Status = uint32(STATUS_NO_SUCH_FILE)
 
@@ -1193,16 +1198,35 @@ func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
 		} else {
 			dir, err := t.fs.ReadDir(vfs.VfsHandle(fileId.HandleId()), pos, 1000)
 			if err == nil {
-				for _, d := range dir {
+				accSize := 0
+				var unconsumed []vfs.DirInfo
+				for i, d := range dir {
 					if MatchWildcard(d.Name, r.FileName()) {
 						info := t.makeItem(r.FileInfoClass(), d)
+						entrySize := info.Size()
+
+						// Check if adding this entry would exceed OutputBufferLength
+						if accSize > 0 && accSize+entrySize > maxOutBytes {
+							// Buffer remaining entries for next call
+							unconsumed = dir[i:]
+							break
+						}
+
 						out.Items = append(out.Items, info)
+						accSize += entrySize
 						Status = 0
 
 						if r.Flags()&RETURN_SINGLE_ENTRY != 0 {
+							if i+1 < len(dir) {
+								unconsumed = dir[i+1:]
+							}
 							break
 						}
 					}
+				}
+				// Put back unconsumed entries so the next QueryDirectory gets them
+				if len(unconsumed) > 0 {
+					t.fs.PutBackDirEntries(vfs.VfsHandle(fileId.HandleId()), unconsumed)
 				}
 			} else {
 				if err == io.EOF {

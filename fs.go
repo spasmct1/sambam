@@ -14,11 +14,12 @@ import (
 )
 
 type OpenFile struct {
-	path   string
-	isDir  bool
-	f      *os.File
-	h      vfs.VfsHandle
-	dirPos int
+	path      string
+	isDir     bool
+	f         *os.File
+	h         vfs.VfsHandle
+	dirPos    int
+	dirBuffer []vfs.DirInfo
 }
 
 type PassthroughFS struct {
@@ -292,6 +293,7 @@ func (fs *PassthroughFS) ReadDir(handle vfs.VfsHandle, pos int, maxEntries int) 
 	if pos != 0 {
 		open.f.Seek(0, 0)
 		open.dirPos = 0
+		open.dirBuffer = nil
 	}
 
 	if open.dirPos == 0 {
@@ -305,25 +307,60 @@ func (fs *PassthroughFS) ReadDir(handle vfs.VfsHandle, pos int, maxEntries int) 
 			vfs.DirInfo{Name: "..", Attributes: *attrs})
 	}
 
+	// First drain any buffered entries from a previous read
+	if len(open.dirBuffer) > 0 {
+		if len(open.dirBuffer) <= maxEntries {
+			results = append(results, open.dirBuffer...)
+			open.dirBuffer = nil
+		} else {
+			results = append(results, open.dirBuffer[:maxEntries]...)
+			open.dirBuffer = open.dirBuffer[maxEntries:]
+			open.dirPos = 1
+			return results, nil
+		}
+		maxEntries -= len(results)
+		if maxEntries <= 0 {
+			open.dirPos = 1
+			return results, nil
+		}
+	}
+
 	entries, err := open.f.ReadDir(maxEntries)
-	if err != nil && (err != io.EOF || open.dirPos != 0) {
+	if err != nil && err != io.EOF {
 		return nil, err
 	}
 
 	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
+		info, infoErr := entry.Info()
+		if infoErr != nil {
 			continue
 		}
-		attrs, err := fileInfoToAttr(info)
-		if err != nil {
+		attrs, attrErr := fileInfoToAttr(info)
+		if attrErr != nil {
 			continue
 		}
 		results = append(results, vfs.DirInfo{Name: entry.Name(), Attributes: *attrs})
 	}
 	open.dirPos = 1
 
+	if err == io.EOF && len(results) == 0 {
+		return nil, io.EOF
+	}
+
 	return results, nil
+}
+
+// PutBackDirEntries stores unconsumed directory entries for the next ReadDir call.
+func (fs *PassthroughFS) PutBackDirEntries(handle vfs.VfsHandle, entries []vfs.DirInfo) {
+	if handle == 0 || len(entries) == 0 {
+		return
+	}
+	v, ok := fs.openFiles.Load(handle)
+	if !ok {
+		return
+	}
+	open := v.(*OpenFile)
+	open.dirBuffer = append(entries, open.dirBuffer...)
 }
 
 func (fs *PassthroughFS) Readlink(handle vfs.VfsHandle) (string, error) {

@@ -41,6 +41,7 @@ type VFSFileSystem interface {
 
 	OpenDir(string) (VfsHandle, error)
 	ReadDir(VfsHandle, int, int) ([]DirInfo, error)
+	PutBackDirEntries(VfsHandle, []DirInfo)
 
 	Readlink(VfsHandle) (string, error)
 
