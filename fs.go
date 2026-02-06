@@ -32,6 +32,10 @@ type PassthroughFS struct {
 	OnDelete func(path string)
 }
 
+func (fs *PassthroughFS) BasePath() string {
+	return fs.rootPath
+}
+
 func NewPassthroughFS(rootPath string, readOnly bool) *PassthroughFS {
 	return &PassthroughFS{
 		rootPath:  rootPath,

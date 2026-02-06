@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/sambam/sambam/smb/internal/crypto/ccm"
 	"github.com/sambam/sambam/smb/internal/crypto/cmac"
 	. "github.com/sambam/sambam/smb/internal/erref"
@@ -60,6 +62,10 @@ type Server struct {
 	acceptSingleConn bool
 
 	onConnect func(remoteAddr string)
+
+	fsWatcher   *fsnotify.Watcher
+	fsWatchRefs map[string]int
+	fsWatchRoot map[string]string // watched path → share base path (for path translation)
 
 	lock sync.Mutex
 }
@@ -180,7 +186,16 @@ func NewServer(cfg *ServerConfig, a Authenticator, shares map[string]vfs.VFSFile
 		activeConns:      map[*conn]struct{}{},
 		acceptSingleConn: cfg.AcceptSingleConn,
 		onConnect:        cfg.OnConnect,
+		fsWatchRefs:      map[string]int{},
+		fsWatchRoot:      map[string]string{},
 	}
+
+	if w, err := fsnotify.NewWatcher(); err == nil {
+		srv.fsWatcher = w
+	} else {
+		log.Warnf("fsnotify: failed to create watcher: %v", err)
+	}
+
 	return srv
 }
 
@@ -203,6 +218,10 @@ func (d *Server) Serve(addr string) error {
 	d.listener = listener
 	defer listener.Close()
 	d.active = true
+
+	if d.fsWatcher != nil {
+		d.startFsWatcher()
+	}
 
 	for d.active {
 		// Accept a new connection.
@@ -270,6 +289,9 @@ func (d *Server) Serve(addr string) error {
 func (d *Server) Shutdown() {
 	d.active = false
 	d.listener.Close()
+	if d.fsWatcher != nil {
+		d.fsWatcher.Close()
+	}
 	for c := range d.activeConns {
 		c.shutdown()
 	}
@@ -1000,6 +1022,99 @@ func (d *Server) deleteOpen(fileId uint64) {
 	}
 }
 
+func (d *Server) addFsWatch(realPath, shareRoot string) {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	if d.fsWatcher == nil {
+		return
+	}
+	d.fsWatchRefs[realPath]++
+	if d.fsWatchRefs[realPath] == 1 {
+		d.fsWatchRoot[realPath] = shareRoot
+		if err := d.fsWatcher.Add(realPath); err != nil {
+			log.Debugf("fsnotify: failed to watch %s: %v", realPath, err)
+			delete(d.fsWatchRefs, realPath)
+			delete(d.fsWatchRoot, realPath)
+		}
+	}
+}
+
+func (d *Server) removeFsWatch(realPath string) {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	if d.fsWatcher == nil {
+		return
+	}
+	d.fsWatchRefs[realPath]--
+	if d.fsWatchRefs[realPath] <= 0 {
+		d.fsWatcher.Remove(realPath)
+		delete(d.fsWatchRefs, realPath)
+		delete(d.fsWatchRoot, realPath)
+	}
+}
+
+func (d *Server) startFsWatcher() {
+	go func() {
+		for {
+			select {
+			case ev, ok := <-d.fsWatcher.Events:
+				if !ok {
+					return
+				}
+				// Convert absolute path to SMB-relative path
+				dir := filepath.Dir(ev.Name)
+				base := filepath.Base(ev.Name)
+
+				d.lock.Lock()
+				shareRoot := d.fsWatchRoot[dir]
+				d.lock.Unlock()
+
+				if shareRoot == "" {
+					continue
+				}
+
+				// Build SMB-relative path: strip share root from dir
+				relDir, err := filepath.Rel(shareRoot, dir)
+				if err != nil {
+					continue
+				}
+				if relDir == "." {
+					relDir = ""
+				}
+
+				var smbPath string
+				if relDir == "" {
+					smbPath = base
+				} else {
+					smbPath = relDir + "/" + base
+				}
+
+				var action uint32
+				switch {
+				case ev.Op&fsnotify.Create != 0:
+					action = FILE_ACTION_ADDED
+				case ev.Op&fsnotify.Remove != 0:
+					action = FILE_ACTION_REMOVED
+				case ev.Op&fsnotify.Write != 0:
+					action = FILE_ACTION_MODIFIED
+				case ev.Op&fsnotify.Rename != 0:
+					action = FILE_ACTION_RENAMED_OLD_NAME
+				default:
+					continue
+				}
+
+				log.Debugf("fsnotify: %s action=%d smbPath=%s", ev.Name, action, smbPath)
+				d.notifyChange(smbPath, action)
+
+			case _, ok := <-d.fsWatcher.Errors:
+				if !ok {
+					return
+				}
+			}
+		}
+	}()
+}
+
 // notifyChange sends a change notification to any pending ChangeNotify
 // watchers on the parent directory of the given file path.
 func (d *Server) notifyChange(filePath string, action uint32) {
@@ -1020,7 +1135,12 @@ func (d *Server) notifyChange(filePath string, action uint32) {
 		if open.notifyCh == nil {
 			continue
 		}
-		if open.pathName == dir || (open.notifyWatchTree && strings.HasPrefix(dir, open.pathName)) {
+		// Normalize root: pathName "/" and dir "" both mean the share root
+		openDir := open.pathName
+		if openDir == "/" {
+			openDir = ""
+		}
+		if openDir == dir || (open.notifyWatchTree && strings.HasPrefix(dir, openDir)) {
 			select {
 			case open.notifyCh <- notifyEvent{Action: action, FileName: smbBase}:
 			default:

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -300,7 +301,9 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 
 	t.conn.serverCtx.addOpen(open)
 
-	// Notify directory watchers of file changes
+	err = c.sendPacket(rsp, &t.treeConn, ctx)
+
+	// Notify directory watchers of file changes (after response is sent)
 	if !isEA && name != "" {
 		switch action {
 		case FILE_CREATED:
@@ -310,7 +313,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		}
 	}
 
-	return c.sendPacket(rsp, &t.treeConn, ctx)
+	return err
 }
 
 func (t *fileTree) handleQFid(pkt []byte, open *Open) (Encoder, error) {
@@ -1324,14 +1327,45 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 	open.notifyCh = make(chan notifyEvent, 1)
 	open.notifyWatchTree = (r.Flags() & 0x0001) != 0
 
+	// Set up filesystem watch for real-time notifications
+	realPath := filepath.Join(t.fs.BasePath(), open.pathName)
+	shareRoot := t.fs.BasePath()
+	t.conn.serverCtx.addFsWatch(realPath, shareRoot)
+
 	handleId := fileId.HandleId()
 	cancelCh := open.notifyCancel
 	eventCh := open.notifyCh
 	go func(ctx *compoundContext, reqPkt []byte, h uint64) {
+		defer t.conn.serverCtx.removeFsWatch(realPath)
+
+		var ev notifyEvent
+		realEvent := false
 		select {
-		case <-eventCh:
+		case ev = <-eventCh:
+			realEvent = true
+			// Adaptive coalesce: wait for a quiet period (no events for 150ms),
+			// capped at 3s max. During bulk operations events keep arriving so
+			// we keep waiting, resulting in very few re-enumerations. A single
+			// server-side change (touch) only delays 150ms.
+			deadline := time.After(3 * time.Second)
+			quiet := time.NewTimer(150 * time.Millisecond)
+		coalesceLoop:
+			for {
+				select {
+				case ev = <-eventCh:
+					quiet.Reset(150 * time.Millisecond)
+				case <-quiet.C:
+					break coalesceLoop
+				case <-deadline:
+					break coalesceLoop
+				case <-cancelCh:
+					realEvent = false
+					break coalesceLoop
+				}
+			}
+			quiet.Stop()
 		case <-cancelCh:
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(3 * time.Second):
 		}
 		if t.conn.serverCtx.getOpen(h) == nil {
 			return
@@ -1340,9 +1374,19 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 		open.notifyCancel = nil
 		open.notifyCh = nil
 
-		final := new(ErrorResponse)
-		PrepareAsyncResponse(&final.PacketHeader, pkt, open.notifyReqAsyncId, uint32(STATUS_CANCELLED))
-		c.sendPacket(final, &t.treeConn, ctx)
+		if realEvent {
+			rsp := new(ChangeNotifyResponse)
+			rsp.Output = &FileNotifyInformationInfo{
+				Action:   ev.Action,
+				FileName: strings.ReplaceAll(ev.FileName, "/", "\\"),
+			}
+			PrepareAsyncResponse(&rsp.PacketHeader, pkt, asyncId, 0)
+			c.sendPacket(rsp, &t.treeConn, ctx)
+		} else {
+			final := new(ErrorResponse)
+			PrepareAsyncResponse(&final.PacketHeader, pkt, asyncId, uint32(STATUS_CANCELLED))
+			c.sendPacket(final, &t.treeConn, ctx)
+		}
 	}(ctx, pkt, handleId)
 
 	return nil
@@ -1872,6 +1916,11 @@ func (t *fileTree) setRename(ctx *compoundContext, fileId *FileId, pkt []byte) e
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
+	rsp := new(SetInfoResponse)
+	PrepareResponse(&rsp.PacketHeader, pkt, 0)
+	sendErr := c.sendPacket(rsp, &t.treeConn, ctx)
+
+	// Notify directory watchers (after response is sent)
 	if open != nil && open.pathName != "" {
 		t.conn.serverCtx.notifyChange(open.pathName, FILE_ACTION_RENAMED_OLD_NAME)
 	}
@@ -1879,9 +1928,7 @@ func (t *fileTree) setRename(ctx *compoundContext, fileId *FileId, pkt []byte) e
 		t.conn.serverCtx.notifyChange(to, FILE_ACTION_RENAMED_NEW_NAME)
 	}
 
-	rsp := new(SetInfoResponse)
-	PrepareResponse(&rsp.PacketHeader, pkt, 0)
-	return c.sendPacket(rsp, &t.treeConn, ctx)
+	return sendErr
 }
 
 func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) error {

@@ -17,6 +17,8 @@ type DirInfo struct {
 }
 
 type VFSFileSystem interface {
+	BasePath() string
+
 	GetAttr(VfsHandle) (*Attributes, error)
 	SetAttr(VfsHandle, *Attributes) (*Attributes, error)
 
