@@ -173,7 +173,8 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		flags |= O_EXLOCK
 		lockState = LOCKSTATE_HELD
 	case SMB2_OPLOCK_LEVEL_LEASE:
-		break
+		// We don't support leases - downgrade to no oplock
+		lockLevel = SMB2_OPLOCK_LEVEL_NONE
 	default:
 		lockLevel = 0
 	}
@@ -336,33 +337,9 @@ func (t *fileTree) handleDH2Q(pkt []byte, open *Open) (Encoder, error) {
 }
 
 func (t *fileTree) handleRqLs(pkt []byte, open *Open) (Encoder, error) {
-	if len(pkt) == 32 {
-		r := LeaseRequestDecoder(pkt)
-		return &CreateContext{
-			Name: "RqLs",
-			Data: &LeaseResponse{
-				LeaseKey:      r.LeaseKey(),
-				LeaseState:    r.LeaseState(),
-				LeaseFlags:    r.LeaseFlags(),
-				LeaseDuration: r.LeaseDuration(),
-			},
-		}, nil
-	}
-
-	r := LeaseRequest2Decoder(pkt)
-	return &CreateContext{
-		Name: "RqLs",
-		Data: &LeaseResponse2{
-			LeaseResponse: LeaseResponse{
-				LeaseKey:      r.LeaseKey(),
-				LeaseState:    r.LeaseState(),
-				LeaseFlags:    r.LeaseFlags(),
-				LeaseDuration: r.LeaseDuration(),
-			},
-			ParentLeaseKey: r.ParentLeaseKey(),
-			Epoch:          1,
-		},
-	}, nil
+	// We don't support leases - don't include a lease context in the response.
+	// The client will see OplockLevel=NONE and fall back to no caching.
+	return nil, fmt.Errorf("leases not supported")
 }
 
 func (t *fileTree) handleCreateEA(disp uint32, h vfs.VfsHandle, eaKey string) (uint32, error) {

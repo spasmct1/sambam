@@ -171,15 +171,25 @@ listen = "0.0.0.0:445"
 # Read-only mode
 readonly = false
 
-# Debug mode
-debug = true
+# Show connections and file activity
+verbose = true
+
+# Show verbose output plus protocol-level details
+# debug = true
+
+# Hide files starting with '.'
+# hide_dotfiles = true
 
 # Authentication
-username = "admin"
-password = "secret123"
+# username = "admin"
+# password = "secret123"
 
 # Auto-expire
-expire = "1h"
+# expire = "1h"
+
+# Daemon mode settings
+# pidfile = "/tmp/sambam.pid"
+# logfile = "/var/log/sambam.log"
 
 # Multiple shares
 [shares]

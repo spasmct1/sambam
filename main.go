@@ -31,14 +31,17 @@ type Share struct {
 
 // Config represents the ~/.sambamrc configuration file
 type Config struct {
-	Listen   string            `toml:"listen"`
-	Readonly bool              `toml:"readonly"`
-	Verbose  bool              `toml:"verbose"`
-	Debug    bool              `toml:"debug"`
-	Username string            `toml:"username"`
-	Password string            `toml:"password"`
-	Expire   string            `toml:"expire"`
-	Shares   map[string]string `toml:"shares"`
+	Listen       string            `toml:"listen"`
+	Readonly     bool              `toml:"readonly"`
+	Verbose      bool              `toml:"verbose"`
+	Debug        bool              `toml:"debug"`
+	HideDotfiles bool              `toml:"hide_dotfiles"`
+	Username     string            `toml:"username"`
+	Password     string            `toml:"password"`
+	Expire       string            `toml:"expire"`
+	PidFile      string            `toml:"pidfile"`
+	LogFile      string            `toml:"logfile"`
+	Shares       map[string]string `toml:"shares"`
 }
 
 // loadConfig loads configuration from ~/.sambamrc if it exists
@@ -74,7 +77,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.2.7"
+	version = "1.2.8"
 )
 
 func main() {
@@ -137,6 +140,15 @@ func main() {
 		}
 		if !pflag.CommandLine.Changed("expire") && config.Expire != "" {
 			*expireStr = config.Expire
+		}
+		if !pflag.CommandLine.Changed("hide-dotfiles") && config.HideDotfiles {
+			*hideDotfiles = true
+		}
+		if !pflag.CommandLine.Changed("pidfile") && config.PidFile != "" {
+			*pidFile = config.PidFile
+		}
+		if !pflag.CommandLine.Changed("logfile") && config.LogFile != "" {
+			*logFile = config.LogFile
 		}
 	}
 

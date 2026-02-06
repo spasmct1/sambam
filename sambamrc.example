@@ -1,5 +1,6 @@
 # sambam configuration file
 # Place this file at ~/.sambamrc
+# CLI flags override these settings.
 
 # Listen address (default: 0.0.0.0:445)
 listen = "0.0.0.0:445"
@@ -7,15 +8,25 @@ listen = "0.0.0.0:445"
 # Read-only mode
 readonly = false
 
-# Debug mode - show connections and file activity
-debug = true
+# Show connections and file activity
+verbose = true
+
+# Show verbose output plus protocol-level details
+# debug = true
+
+# Hide files starting with '.'
+# hide_dotfiles = true
 
 # Authentication (optional)
 # username = "admin"
 # password = "secret123"
 
-# Auto-expire (optional)
+# Auto-expire (optional, e.g. 30m, 1h, 2h30m)
 # expire = "30m"
+
+# Daemon mode settings
+# pidfile = "/tmp/sambam.pid"
+# logfile = "/var/log/sambam.log"
 
 # Shares - map of share_name = "/path/to/folder"
 [shares]
