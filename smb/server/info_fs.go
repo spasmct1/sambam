@@ -909,6 +909,41 @@ func (i *FileNotifyInformationInfo) Encode(pkt []byte) {
 	utf16le.EncodeString(pkt[12:], i.FileName)
 }
 
+// FileNotifyInformationList encodes a chain of FILE_NOTIFY_INFORMATION entries
+// with proper NextEntryOffset linking and 4-byte alignment.
+type FileNotifyInformationList []FileNotifyInformationInfo
+
+func (l FileNotifyInformationList) Size() int {
+	total := 0
+	for i, info := range l {
+		s := info.Size()
+		if i < len(l)-1 {
+			s = (s + 3) &^ 3 // pad to 4-byte alignment
+		}
+		total += s
+	}
+	return total
+}
+
+func (l FileNotifyInformationList) Encode(pkt []byte) {
+	off := 0
+	for i := range l {
+		s := l[i].Size()
+		padded := s
+		if i < len(l)-1 {
+			padded = (s + 3) &^ 3
+			l[i].NextEntryOffset = uint32(padded)
+		} else {
+			l[i].NextEntryOffset = 0
+		}
+		l[i].Encode(pkt[off:])
+		for j := s; j < padded; j++ {
+			pkt[off+j] = 0
+		}
+		off += padded
+	}
+}
+
 type AfpInfo struct {
 	Signature  [4]byte // always "AFP_"
 	Version    [4]byte // usually 0x00010000 for AFP_AfpInfo

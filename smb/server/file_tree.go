@@ -1330,7 +1330,7 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 	open.notifyReq = pkt
 	open.notifyCancel = make(chan struct{}, 1)
 	if open.notifyCh == nil {
-		open.notifyCh = make(chan notifyEvent, 1)
+		open.notifyCh = make(chan notifyEvent, 64)
 	}
 	open.notifyWatchTree = (r.Flags() & 0x0001) != 0
 
@@ -1351,11 +1351,10 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 	copy(savedPkt, pkt)
 
 	go func(ctx *compoundContext, reqPkt []byte, h uint64) {
-		var ev notifyEvent
-		realEvent := false
+		var events []notifyEvent
 		select {
-		case ev = <-eventCh:
-			realEvent = true
+		case ev := <-eventCh:
+			events = append(events, ev)
 			// Adaptive coalesce: wait for a quiet period (no events for 150ms),
 			// capped at 3s max. During bulk operations events keep arriving so
 			// we keep waiting, resulting in very few re-enumerations. A single
@@ -1366,13 +1365,14 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 			for {
 				select {
 				case ev = <-eventCh:
+					events = append(events, ev)
 					quiet.Reset(150 * time.Millisecond)
 				case <-quiet.C:
 					break coalesceLoop
 				case <-deadline:
 					break coalesceLoop
 				case <-cancelCh:
-					realEvent = false
+					events = nil
 					break coalesceLoop
 				}
 			}
@@ -1390,13 +1390,17 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 		open.notifyCancel = nil
 		// Keep notifyCh alive to buffer events between ChangeNotify cycles
 
-		if realEvent {
-			log.Debugf("ChangeNotify: sending real event h=%d action=%d file=%s", h, ev.Action, ev.FileName)
+		if len(events) > 0 {
+			log.Debugf("ChangeNotify: sending %d events h=%d", len(events), h)
 			rsp := new(ChangeNotifyResponse)
-			rsp.Output = &FileNotifyInformationInfo{
-				Action:   ev.Action,
-				FileName: strings.ReplaceAll(ev.FileName, "/", "\\"),
+			list := make(FileNotifyInformationList, len(events))
+			for i, ev := range events {
+				list[i] = FileNotifyInformationInfo{
+					Action:   ev.Action,
+					FileName: strings.ReplaceAll(ev.FileName, "/", "\\"),
+				}
 			}
+			rsp.Output = list
 			PrepareAsyncResponse(&rsp.PacketHeader, reqPkt, asyncId, 0)
 			c.sendPacket(rsp, &t.treeConn, ctx)
 		} else {
