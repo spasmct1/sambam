@@ -300,6 +300,16 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 
 	t.conn.serverCtx.addOpen(open)
 
+	// Notify directory watchers of file changes
+	if !isEA && name != "" {
+		switch action {
+		case FILE_CREATED:
+			t.conn.serverCtx.notifyChange(name, FILE_ACTION_ADDED)
+		case FILE_OVERWRITTEN, FILE_SUPERSEDED:
+			t.conn.serverCtx.notifyChange(name, FILE_ACTION_MODIFIED)
+		}
+	}
+
 	return c.sendPacket(rsp, &t.treeConn, ctx)
 }
 
@@ -484,6 +494,8 @@ send:
 	if open != nil && open.deleteAfterClose {
 		if err := t.fs.Unlink(vfs.VfsHandle(fileId.HandleId())); err != nil {
 			log.Errorf("Delete failed: %v", err)
+		} else if open.pathName != "" {
+			t.conn.serverCtx.notifyChange(open.pathName, FILE_ACTION_REMOVED)
 		}
 	}
 
@@ -492,10 +504,11 @@ send:
 
 	c.sendPacket(rsp, &t.treeConn, ctx)
 
-	if open != nil && open.notifyReq != nil {
-		rsp1 := new(ErrorResponse)
-		PrepareAsyncResponse(&rsp1.PacketHeader, open.notifyReq, open.notifyReqAsyncId, uint32(STATUS_ACCESS_DENIED))
-		//c.sendPacket(rsp1, &t.treeConn, nil)
+	if open != nil && open.notifyCancel != nil {
+		select {
+		case open.notifyCancel <- struct{}{}:
+		default:
+		}
 	}
 	return nil
 }
@@ -927,12 +940,26 @@ func (t *fileTree) ioctl(ctx *compoundContext, pkt []byte) error {
 
 func (t *fileTree) cancel(ctx *compoundContext, pkt []byte) error {
 	log.Debugf("Cancel request received")
-	c := t.session.conn
 
-	rsp := new(ErrorResponse)
-	PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+	p := PacketCodec(pkt)
+	asyncId := p.AsyncId()
 
-	return c.sendPacket(rsp, &t.treeConn, ctx)
+	// Cancel the pending ChangeNotify matching this asyncId
+	if asyncId != 0 {
+		t.conn.serverCtx.lock.Lock()
+		for _, open := range t.conn.serverCtx.opens {
+			if open.notifyReqAsyncId == asyncId && open.notifyCancel != nil {
+				select {
+				case open.notifyCancel <- struct{}{}:
+				default:
+				}
+				break
+			}
+		}
+		t.conn.serverCtx.lock.Unlock()
+	}
+
+	return nil
 }
 
 func newFileDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) FileDirectoryInformationInfo {
@@ -1293,19 +1320,28 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 	}
 	open.notifyReqAsyncId = asyncId
 	open.notifyReq = pkt
+	open.notifyCancel = make(chan struct{}, 1)
+	open.notifyCh = make(chan notifyEvent, 1)
+	open.notifyWatchTree = (r.Flags() & 0x0001) != 0
 
 	handleId := fileId.HandleId()
+	cancelCh := open.notifyCancel
+	eventCh := open.notifyCh
 	go func(ctx *compoundContext, reqPkt []byte, h uint64) {
-		time.Sleep(5 * time.Second)
+		select {
+		case <-eventCh:
+		case <-cancelCh:
+		case <-time.After(500 * time.Millisecond):
+		}
 		if t.conn.serverCtx.getOpen(h) == nil {
-			// Open was closed; do not send completion
 			return
 		}
 		open.notifyReq = nil
+		open.notifyCancel = nil
+		open.notifyCh = nil
 
-		// Complete the notify with an empty response
 		final := new(ErrorResponse)
-		PrepareAsyncResponse(&final.PacketHeader, pkt, open.notifyReqAsyncId, uint32(STATUS_ACCESS_DENIED))
+		PrepareAsyncResponse(&final.PacketHeader, pkt, open.notifyReqAsyncId, uint32(STATUS_CANCELLED))
 		c.sendPacket(final, &t.treeConn, ctx)
 	}(ctx, pkt, handleId)
 
@@ -1828,11 +1864,19 @@ func (t *fileTree) setRename(ctx *compoundContext, fileId *FileId, pkt []byte) e
 
 	log.Debugf("setRename %s, root %d", info.FileName(), info.RootDirectory())
 	to := strings.ReplaceAll(info.FileName(), "\\", "/")
+	open := t.conn.serverCtx.getOpen(fileId.HandleId())
 	if err := t.fs.Rename(vfs.VfsHandle(fileId.HandleId()), to, int(info.ReplaceIfExists())); err != nil {
 		log.Errorf("rename failed: %v", err)
 		rsp := new(ErrorResponse)
 		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
 		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
+
+	if open != nil && open.pathName != "" {
+		t.conn.serverCtx.notifyChange(open.pathName, FILE_ACTION_RENAMED_OLD_NAME)
+	}
+	if to != "" {
+		t.conn.serverCtx.notifyChange(to, FILE_ACTION_RENAMED_NEW_NAME)
 	}
 
 	rsp := new(SetInfoResponse)

@@ -72,6 +72,11 @@ const (
 	LOCKSTATE_BREAKING
 )
 
+type notifyEvent struct {
+	Action   uint32
+	FileName string
+}
+
 type Open struct {
 	fileId                      uint64
 	durableFileId               uint64
@@ -103,6 +108,9 @@ type Open struct {
 	lockSequenceArray           [64]byte
 	notifyReq                   []byte
 	notifyReqAsyncId            uint64
+	notifyCancel                chan struct{}
+	notifyCh                    chan notifyEvent
+	notifyWatchTree             bool
 	isEa                        bool
 	eaKey                       string
 	isSymlink                   bool
@@ -991,3 +999,33 @@ func (d *Server) deleteOpen(fileId uint64) {
 		}
 	}
 }
+
+// notifyChange sends a change notification to any pending ChangeNotify
+// watchers on the parent directory of the given file path.
+func (d *Server) notifyChange(filePath string, action uint32) {
+	// Find parent directory and base name
+	// Paths use forward slashes internally (e.g. "Quake 3/file.exe")
+	dir := ""
+	base := filePath
+	if idx := strings.LastIndex(filePath, "/"); idx >= 0 {
+		dir = filePath[:idx]
+		base = filePath[idx+1:]
+	}
+	// Convert base name to backslashes for SMB response
+	smbBase := strings.ReplaceAll(base, "/", "\\")
+
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	for _, open := range d.opens {
+		if open.notifyCh == nil {
+			continue
+		}
+		if open.pathName == dir || (open.notifyWatchTree && strings.HasPrefix(dir, open.pathName)) {
+			select {
+			case open.notifyCh <- notifyEvent{Action: action, FileName: smbBase}:
+			default:
+			}
+		}
+	}
+}
+
