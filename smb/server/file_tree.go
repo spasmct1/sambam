@@ -1400,6 +1400,16 @@ func (t *fileTree) queryInfoFileSystem(ctx *compoundContext, pkt []byte) error {
 			SectorsPerAllocationUnit:       bs / 512,
 			BytesPerSector:                 512,
 		}
+	case FileFsSectorSizeInformation:
+		info = &FileFsSectorSizeInformationInfo{
+			LogicalBytesPerSector:                                 512,
+			PhysicalBytesPerSectorForAtomicity:                    bs,
+			PhysicalBytesPerSectorForPerformance:                  bs,
+			FileSystemEffectivePhysicalBytesPerSectorForAtomicity: bs,
+			Flags:                           0,
+			ByteOffsetForSectorAlignment:    0,
+			ByteOffsetForPartitionAlignment: 0,
+		}
 	case FileFsObjectIdInformation:
 		fileId := r.FileId().Decode()
 		if ctx != nil && ctx.fileId != nil {

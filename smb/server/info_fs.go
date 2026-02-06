@@ -481,6 +481,20 @@ type FileFsSectorSizeInformationInfo struct {
 	ByteOffsetForPartitionAlignment                       uint32
 }
 
+func (i *FileFsSectorSizeInformationInfo) Size() int {
+	return 28
+}
+
+func (i *FileFsSectorSizeInformationInfo) Encode(pkt []byte) {
+	le.PutUint32(pkt[0:], i.LogicalBytesPerSector)
+	le.PutUint32(pkt[4:], i.PhysicalBytesPerSectorForAtomicity)
+	le.PutUint32(pkt[8:], i.PhysicalBytesPerSectorForPerformance)
+	le.PutUint32(pkt[12:], i.FileSystemEffectivePhysicalBytesPerSectorForAtomicity)
+	le.PutUint32(pkt[16:], i.Flags)
+	le.PutUint32(pkt[20:], i.ByteOffsetForSectorAlignment)
+	le.PutUint32(pkt[24:], i.ByteOffsetForPartitionAlignment)
+}
+
 type FileFsSizeInformationInfo struct {
 	TotalAllocationUnits     int64
 	AvailableAllocationUnits int64

@@ -1,8 +1,8 @@
 # sambam
 
-**The fastest way to share files with Windows and macOS.** No setup. No passwords. No patience required.
+**The fastest way to share files with Windows, macOS and Linux.** No setup. No passwords. No patience required.
 
-> 🤖 **Built with AI assistance** — Idea and design by a human, code by an AI. Fully open source and auditable.
+> **Built with AI assistance** — Idea and design by a human, code by an AI. Fully open source and auditable.
 
 You know the drill: Your colleague needs a file. They're on Windows. You're on Linux. You could email it (if it's under 25MB). You could upload it to some cloud service (and wait). You could set up Samba (LOL, see you next week). Or...
 
@@ -35,13 +35,14 @@ Done. They open `\\your-ip\share` in Explorer. Files are flowing. You're a hero.
 - **Multiple shares** - Share multiple directories with different names
 - **Auto-expire** - Automatically stop sharing after a set time
 - **Config file** - Save your settings in `~/.sambamrc`
-- **Cross-platform clients** - Works with Windows 10/11 and macOS
+- **Cross-platform clients** - Works with Windows 10/11, macOS, and Linux (CIFS mount)
+- **SMB 2.1 / 3.0** - Compatible with modern SMB protocol versions
 - **Single binary** - Runs on any Linux distribution (Debian, Ubuntu, OpenWrt, etc.)
 - **Daemon mode** - Run in background, stop when done
 
 ## Installation
 
-Download the latest binary from the [Releases](https://github.com/darkpenguin23/sambam/releases) page, then: 
+Download the latest binary from the [Releases](https://github.com/darkpenguin23/sambam/releases) page, then:
 
 ```bash
 chmod +x sambam-linux-amd64
@@ -54,69 +55,110 @@ Or build from source:
 go build -o sambam .
 ```
 
-## Usage
+## Quick Start
 
 ```bash
-# Share current directory
+# Share current directory (anonymous access, read-write)
 sudo sambam
 
 # Share a specific folder
 sudo sambam /path/to/folder
 
-# Custom share name
-sudo sambam -n photos ~/Pictures
-
-# Multiple shares
-sudo sambam -n docs:/home/user/documents -n pics:/home/user/photos
-
-# Read-only (they can look, but not touch)
-sudo sambam -r /data
-
-# Require authentication (generates random password)
-sudo sambam --username admin /data
-
-# Require authentication with specific password
-sudo sambam --username admin --password secret123 /data
-
-# Auto-expire after 30 minutes
-sudo sambam --expire 30m /data
-
-# Run as daemon (background)
-sudo sambam -d /data
-
-# Stop the daemon
-sudo sambam stop
-
-# Debug mode (see connections and file activity)
-sudo sambam --debug /data
-
-# Hide dotfiles (files starting with '.')
-sudo sambam --hide-dotfiles /data
-
-# Daemon with logging and authentication
-sudo sambam -d --debug --username admin -L /var/log/sambam.log /data
+# Share read-only with a custom name
+sudo sambam -r -n photos ~/Pictures
 ```
-
-
-
 
 ## Options
 
+### `-n, --name <name>` or `-n <name:path>`
+
+Set the share name. By default the share is called `share`. Use `name:path` syntax to specify both name and path. Repeatable for multiple shares.
+
+```bash
+sudo sambam -n myfiles /data
+sudo sambam -n docs:/home/user/documents -n pics:/home/user/photos
 ```
--n, --name       Share name or name:path (repeatable for multiple shares)
--l, --listen     Listen address (default: "0.0.0.0:445")
--r, --readonly   Read-only mode
---username       Require authentication with this username
---password       Password for authentication (random if not set)
---expire         Auto-shutdown after duration (e.g., 30m, 1h, 2h30m)
---debug          Show connections and file activity
---hide-dotfiles  Hide files starting with '.' (visible by default)
--d, --daemon     Run as background daemon
--p, --pidfile    PID file location (default: "/tmp/sambam.pid")
--L, --logfile    Log file for daemon mode
--v, --version    Show version
--h, --help       Show help
+
+### `-l, --listen <address>`
+
+Address and port to listen on. Default: `0.0.0.0:445`. Use a non-standard port if 445 is already in use.
+
+```bash
+sudo sambam -l 0.0.0.0:8445 /data
 ```
+
+### `-r, --readonly`
+
+Share in read-only mode. Clients can browse and copy files but cannot modify, delete, or upload.
+
+### `--username <name>`
+
+Require authentication. Clients must provide this username to access the share. When set, anonymous access is disabled. If `--password` is not specified, a random password is generated and displayed in the banner.
+
+```bash
+sudo sambam --username admin /data
+sudo sambam --username admin --password secret123 /data
+```
+
+### `--password <password>`
+
+Set a specific password for authentication. Only used together with `--username`. If omitted, a random 10-character password is generated.
+
+### `--expire <duration>`
+
+Automatically stop sharing after the given duration. Accepts Go duration format: `30m`, `1h`, `2h30m`, etc.
+
+```bash
+sudo sambam --expire 30m /data
+```
+
+### `-v, --verbose`
+
+Show real-time connection and file activity.
+
+```
+  15:04:05 connect 192.168.1.100:54321
+  15:04:10 [share] create file documents/report.docx
+  15:04:12 [share] create dir  backup
+  15:04:15 [share] delete temp/old-file.txt
+```
+
+### `--debug`
+
+Includes everything from `--verbose` plus low-level SMB protocol details (negotiate, session setup, tree connect, query info, etc.). Useful for troubleshooting protocol issues.
+
+### `--hide-dotfiles`
+
+Hide files starting with `.` from directory listings. By default dotfiles are visible.
+
+### `-d, --daemon`
+
+Run sambam as a background daemon. Use `sambam stop` to stop it.
+
+```bash
+sudo sambam -d /data
+sudo sambam stop
+```
+
+### `-p, --pidfile <path>`
+
+PID file location for daemon mode. Default: `/tmp/sambam.pid`.
+
+### `-L, --logfile <path>`
+
+Log file path for daemon mode. Without this, daemon output goes to `/dev/null`.
+
+```bash
+sudo sambam -d -L /var/log/sambam.log /data
+```
+
+### `-V, --version`
+
+Show version and exit.
+
+### `-h, --help`
+
+Show help and exit.
 
 ## Configuration File
 
@@ -152,7 +194,7 @@ CLI flags override config file settings. See `sambamrc.example` for a full examp
 Once sambam is running, it shows you the exact path to use:
 
 ```
-  🔗 sambam v1.2.0
+  sambam v1.2.6
 
   Sharing      /home/user/documents
   Share        share
@@ -163,22 +205,7 @@ Once sambam is running, it shows you the exact path to use:
   Connect from Windows:
     \\192.168.1.100\share
 
-  Press Ctrl+C to stop
-```
-
-With authentication enabled:
-
-```
-  🔗 sambam v1.2.0
-
-  Sharing      /home/user/documents
-  Share        share
-  Listen       0.0.0.0:445
-  Mode         read-write
-  Auth         admin:xK9mQ2pL5n
-
-  Connect from Windows:
-    \\192.168.1.100\share
+  Built with AI assistance
 
   Press Ctrl+C to stop
 ```
@@ -189,9 +216,21 @@ From Windows:
 3. Press Enter
 4. If authentication is required, enter the username and password
 
-Or mount as a drive with credentials:
+Or mount as a drive:
 ```cmd
 net use Z: \\192.168.1.100\share /user:admin
+```
+
+## Connecting from Linux
+
+Mount using CIFS with SMB 3.0:
+
+```bash
+# Anonymous access
+sudo mount -t cifs //server-ip/share /mnt/share -o guest,vers=3.0
+
+# With authentication
+sudo mount -t cifs //server-ip/share /mnt/share -o username=admin,password=secret123,vers=3.0
 ```
 
 ## Windows Credential Troubleshooting
@@ -211,22 +250,11 @@ net use * /delete
 
 After clearing cached connections, reconnect and Windows will prompt for new credentials.
 
-## Debug Output
-
-With `--debug` flag, see what's happening in real-time:
-
-```
-  15:04:05 connect 192.168.1.100:54321
-  15:04:10 create file documents/report.docx
-  15:04:12 create dir  backup
-  15:04:15 delete temp/old-file.txt
-```
-
 ## Requirements
 
 - **Root privileges** - Port 445 requires root (or use `-l :8445` for non-standard port)
 - **Linux server** - Works on any distribution (Debian, Ubuntu, OpenWrt, Alpine, etc.)
-- **Clients** - Windows 10/11 or macOS (any version with SMB support)
+- **Clients** - Windows 10/11, macOS, or Linux (via CIFS mount)
 
 ## Security Notice
 

@@ -33,6 +33,7 @@ type Share struct {
 type Config struct {
 	Listen   string            `toml:"listen"`
 	Readonly bool              `toml:"readonly"`
+	Verbose  bool              `toml:"verbose"`
 	Debug    bool              `toml:"debug"`
 	Username string            `toml:"username"`
 	Password string            `toml:"password"`
@@ -73,7 +74,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.2.6"
+	version = "1.2.7"
 )
 
 func main() {
@@ -90,7 +91,7 @@ func main() {
 	shareSpecs := pflag.StringArrayP("name", "n", []string{}, "Share specification (name:path or just name)")
 	listenAddr := pflag.StringP("listen", "l", "0.0.0.0:445", "Address to listen on")
 	readOnly := pflag.BoolP("readonly", "r", false, "Make share read-only")
-	showVersion := pflag.BoolP("version", "v", false, "Show version")
+	showVersion := pflag.BoolP("version", "V", false, "Show version")
 	showHelp := pflag.BoolP("help", "h", false, "Show help")
 
 	// Daemon mode flags
@@ -98,8 +99,9 @@ func main() {
 	pidFile := pflag.StringP("pidfile", "p", "/tmp/sambam.pid", "PID file location (daemon mode)")
 	logFile := pflag.StringP("logfile", "L", "", "Log file path (daemon mode)")
 
-	// Debug flag
-	debugMode := pflag.Bool("debug", false, "Show client connections")
+	// Verbosity flags
+	verbose := pflag.BoolP("verbose", "v", false, "Show connections and file activity")
+	debugMode := pflag.Bool("debug", false, "Show verbose output plus protocol-level details")
 
 	// Hidden files flag
 	hideDotfiles := pflag.Bool("hide-dotfiles", false, "Hide files starting with '.'")
@@ -120,6 +122,9 @@ func main() {
 		}
 		if !pflag.CommandLine.Changed("readonly") && config.Readonly {
 			*readOnly = true
+		}
+		if !pflag.CommandLine.Changed("verbose") && config.Verbose {
+			*verbose = true
 		}
 		if !pflag.CommandLine.Changed("debug") && config.Debug {
 			*debugMode = true
@@ -287,8 +292,8 @@ func main() {
 	for _, share := range shares {
 		fs := NewPassthroughFS(share.Path, *readOnly)
 
-		// Setup filesystem callbacks for debug mode
-		if *debugMode {
+		// Setup filesystem callbacks for verbose/debug mode
+		if *verbose || *debugMode {
 			shareName := share.Name // capture for closure
 			fs.OnCreate = func(path string, isDir bool) {
 				timestamp := time.Now().Format("15:04:05")
@@ -321,9 +326,9 @@ func main() {
 		hostname = "SAMBAM"
 	}
 
-	// Setup connection callback for debug mode
+	// Setup connection callback for verbose/debug mode
 	var onConnect func(string)
-	if *debugMode {
+	if *verbose || *debugMode {
 		onConnect = func(remoteAddr string) {
 			timestamp := time.Now().Format("15:04:05")
 			if *daemonMode {
@@ -561,12 +566,13 @@ func printUsage() {
 	fmt.Printf("        %s  %s\n", Green("--username"), "Require authentication")
 	fmt.Printf("        %s  %s\n", Green("--password"), "Password "+Dim("(random if not set)"))
 	fmt.Printf("        %s    %s\n", Green("--expire"), "Auto-shutdown after duration "+Dim("(e.g., 30m, 1h)"))
-	fmt.Printf("        %s     %s\n", Green("--debug"), "Show connections and file activity")
+	fmt.Printf("    %s, %s   %s\n", Green("-v"), Green("--verbose"), "Show connections and file activity")
+	fmt.Printf("        %s     %s\n", Green("--debug"), "Verbose output plus protocol-level details")
 	fmt.Printf("        %s\n", Green("--hide-dotfiles")+"  Hide files starting with '.'")
 	fmt.Printf("    %s, %s    %s\n", Green("-d"), Green("--daemon"), "Run as background daemon")
 	fmt.Printf("    %s, %s   %s\n", Green("-p"), Green("--pidfile"), "PID file location "+Dim("(default: /tmp/sambam.pid)"))
 	fmt.Printf("    %s, %s   %s\n", Green("-L"), Green("--logfile"), "Log file path (daemon mode)")
-	fmt.Printf("    %s, %s   %s\n", Green("-v"), Green("--version"), "Show version")
+	fmt.Printf("    %s, %s   %s\n", Green("-V"), Green("--version"), "Show version")
 	fmt.Printf("    %s, %s      %s\n", Green("-h"), Green("--help"), "Show help")
 	fmt.Println()
 	fmt.Println(Bold("  Examples:"))
