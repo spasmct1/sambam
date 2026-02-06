@@ -1607,21 +1607,24 @@ func (t *fileTree) queryInfoSec(ctx *compoundContext, pkt []byte) error {
 		default:
 			mode |= syscall.S_IFREG
 		}
+		// Use owner permissions for all ACEs since sambam runs as root
+		// and all clients effectively have owner-level access
+		ownerMode := uint8((mode & 0700) >> 6)
 		sd.Dacl = &ACL{
 			ACE{ //OWner
 				Sid:  SIDFromUid(uid),
 				Type: ACCESS_ALLOWED_ACE_TYPE,
-				Mask: UnixModeToAceMask(uint8((mode & 0700) >> 6)),
+				Mask: UnixModeToAceMask(ownerMode),
 			},
 			ACE{ // Group
 				Sid:  SIDFromGid(gid),
 				Type: ACCESS_ALLOWED_ACE_TYPE,
-				Mask: UnixModeToAceMask(uint8((mode & 0070) >> 3)),
+				Mask: UnixModeToAceMask(ownerMode),
 			},
 			ACE{ // Everyone
 				Sid:  &SID{IdentifierAuthority: WORLD_SID_AUTHORITY, SubAuthority: []uint32{0}},
 				Type: ACCESS_ALLOWED_ACE_TYPE,
-				Mask: UnixModeToAceMask(uint8(mode & 0007)),
+				Mask: UnixModeToAceMask(ownerMode),
 			},
 			ACE{ // Mode
 				Sid:  SIDFromMode(mode),
