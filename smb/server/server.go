@@ -120,6 +120,7 @@ type Open struct {
 	isEa                        bool
 	eaKey                       string
 	isSymlink                   bool
+	fsWatchPath                 string // real filesystem path being watched (persistent for handle lifetime)
 	createGuid                  Guid
 	appInstanceId               Guid
 	isPersistent                bool

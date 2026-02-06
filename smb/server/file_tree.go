@@ -513,6 +513,9 @@ send:
 		default:
 		}
 	}
+	if open != nil && open.fsWatchPath != "" {
+		t.conn.serverCtx.removeFsWatch(open.fsWatchPath)
+	}
 	return nil
 }
 
@@ -947,16 +950,18 @@ func (t *fileTree) cancel(ctx *compoundContext, pkt []byte) error {
 	p := PacketCodec(pkt)
 	asyncId := p.AsyncId()
 
-	// Cancel the pending ChangeNotify matching this asyncId
+	// Cancel ALL pending ChangeNotify on this connection, not just the one
+	// matching asyncId. Explorer registers two watchers but only cancels one
+	// by asyncId — the other would block until timeout. Cancelling both
+	// ensures copy/replace/delete operations start immediately.
 	if asyncId != 0 {
 		t.conn.serverCtx.lock.Lock()
 		for _, open := range t.conn.serverCtx.opens {
-			if open.notifyReqAsyncId == asyncId && open.notifyCancel != nil {
+			if open.session != nil && open.session.conn == t.session.conn && open.notifyCancel != nil {
 				select {
 				case open.notifyCancel <- struct{}{}:
 				default:
 				}
-				break
 			}
 		}
 		t.conn.serverCtx.lock.Unlock()
@@ -1324,20 +1329,28 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 	open.notifyReqAsyncId = asyncId
 	open.notifyReq = pkt
 	open.notifyCancel = make(chan struct{}, 1)
-	open.notifyCh = make(chan notifyEvent, 1)
+	if open.notifyCh == nil {
+		open.notifyCh = make(chan notifyEvent, 1)
+	}
 	open.notifyWatchTree = (r.Flags() & 0x0001) != 0
 
-	// Set up filesystem watch for real-time notifications
-	realPath := filepath.Join(t.fs.BasePath(), open.pathName)
-	shareRoot := t.fs.BasePath()
-	t.conn.serverCtx.addFsWatch(realPath, shareRoot)
+	// Set up filesystem watch (persistent for directory handle lifetime)
+	if open.fsWatchPath == "" {
+		realPath := filepath.Join(t.fs.BasePath(), open.pathName)
+		shareRoot := t.fs.BasePath()
+		t.conn.serverCtx.addFsWatch(realPath, shareRoot)
+		open.fsWatchPath = realPath
+	}
 
 	handleId := fileId.HandleId()
 	cancelCh := open.notifyCancel
 	eventCh := open.notifyCh
-	go func(ctx *compoundContext, reqPkt []byte, h uint64) {
-		defer t.conn.serverCtx.removeFsWatch(realPath)
 
+	// Copy the request packet — the receiver may reuse the buffer
+	savedPkt := make([]byte, len(pkt))
+	copy(savedPkt, pkt)
+
+	go func(ctx *compoundContext, reqPkt []byte, h uint64) {
 		var ev notifyEvent
 		realEvent := false
 		select {
@@ -1365,29 +1378,34 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 			}
 			quiet.Stop()
 		case <-cancelCh:
-		case <-time.After(3 * time.Second):
+			log.Debugf("ChangeNotify: cancelled h=%d", h)
+		case <-time.After(30 * time.Second):
+			log.Debugf("ChangeNotify: timeout h=%d", h)
 		}
 		if t.conn.serverCtx.getOpen(h) == nil {
+			log.Debugf("ChangeNotify: open gone h=%d", h)
 			return
 		}
 		open.notifyReq = nil
 		open.notifyCancel = nil
-		open.notifyCh = nil
+		// Keep notifyCh alive to buffer events between ChangeNotify cycles
 
 		if realEvent {
+			log.Debugf("ChangeNotify: sending real event h=%d action=%d file=%s", h, ev.Action, ev.FileName)
 			rsp := new(ChangeNotifyResponse)
 			rsp.Output = &FileNotifyInformationInfo{
 				Action:   ev.Action,
 				FileName: strings.ReplaceAll(ev.FileName, "/", "\\"),
 			}
-			PrepareAsyncResponse(&rsp.PacketHeader, pkt, asyncId, 0)
+			PrepareAsyncResponse(&rsp.PacketHeader, reqPkt, asyncId, 0)
 			c.sendPacket(rsp, &t.treeConn, ctx)
 		} else {
+			log.Debugf("ChangeNotify: sending STATUS_CANCELLED h=%d", h)
 			final := new(ErrorResponse)
-			PrepareAsyncResponse(&final.PacketHeader, pkt, asyncId, uint32(STATUS_CANCELLED))
+			PrepareAsyncResponse(&final.PacketHeader, reqPkt, asyncId, uint32(STATUS_CANCELLED))
 			c.sendPacket(final, &t.treeConn, ctx)
 		}
-	}(ctx, pkt, handleId)
+	}(ctx, savedPkt, handleId)
 
 	return nil
 }
