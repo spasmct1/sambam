@@ -73,7 +73,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.2.5"
+	version = "1.2.6"
 )
 
 func main() {
@@ -483,7 +483,7 @@ func formatDuration(d time.Duration) string {
 
 func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []string, portSuffix string, username string, password string, expireStr string) {
 	fmt.Println()
-	fmt.Printf("  %s\n", CyanBold("🔗 sambam v"+version))
+	fmt.Printf("  %s\n", CyanBold("sambam v"+version))
 	fmt.Println()
 
 	// Show shares
@@ -512,9 +512,9 @@ func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []
 
 	modeStr := "read-write"
 	if readOnly {
-		modeStr = Red("read-only")
+		modeStr = Green("read-only")
 	} else {
-		modeStr = Green("read-write")
+		modeStr = Red("read-write")
 	}
 	fmt.Printf("  %-12s %s\n", "Mode", modeStr)
 
@@ -532,6 +532,8 @@ func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []
 		}
 	}
 	fmt.Println()
+	fmt.Printf("  %s\n", Dim("Built with AI assistance"))
+	fmt.Println()
 	if expireStr != "" {
 		fmt.Printf("  %s\n", Dim("Press Ctrl+C to stop, or wait for expiry"))
 		fmt.Println()
@@ -539,14 +541,12 @@ func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []
 		fmt.Printf("  %s %s   ", Dim("Expires in"), Yellow(expireStr))
 	} else {
 		fmt.Printf("  %s\n", Dim("Press Ctrl+C to stop"))
-		fmt.Println()
 	}
-	fmt.Printf("  %s\n", Dim("Built with AI assistance"))
 }
 
 func printUsage() {
 	fmt.Println()
-	fmt.Printf("  %s %s\n", CyanBold("🔗 sambam v"+version), Dim("(built with AI assistance)"))
+	fmt.Printf("  %s %s\n", CyanBold("sambam v"+version), Dim("(built with AI assistance)"))
 	fmt.Println()
 	fmt.Println(Dim("  Instant SMB/CIFS file sharing for Windows clients"))
 	fmt.Println()
@@ -575,8 +575,6 @@ func printUsage() {
 	fmt.Printf("    %s  %s\n", Cyan("sambam -n myfiles .")+"                 ", Dim("# Share current dir as 'myfiles'"))
 	fmt.Printf("    %s  %s\n", Cyan("sambam -n docs:/docs -n pics:/photos"), Dim("# Multiple shares"))
 	fmt.Printf("    %s  %s\n", Cyan("sambam -r /data")+"                     ", Dim("# Read-only share"))
-	fmt.Printf("    %s  %s\n", Cyan("sambam --username admin /data")+"       ", Dim("# With authentication"))
-	fmt.Printf("    %s  %s\n", Cyan("sambam --expire 30m /data")+"           ", Dim("# Auto-stop after 30 minutes"))
 	fmt.Printf("    %s  %s\n", Cyan("sambam -d /data")+"                     ", Dim("# Run as daemon"))
 	fmt.Printf("    %s  %s\n", Cyan("sambam stop")+"                         ", Dim("# Stop running daemon"))
 	fmt.Println()
