@@ -77,7 +77,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.2.9"
+	version = "1.2.10"
 )
 
 func main() {
@@ -185,22 +185,22 @@ func main() {
 				shares = append(shares, Share{Name: name, Path: absPath})
 			}
 		} else {
-			// Default: share current directory as "share"
+			// Default: share current directory using folder name
 			absPath, err := filepath.Abs(".")
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
 				os.Exit(1)
 			}
-			shares = append(shares, Share{Name: "share", Path: absPath})
+			shares = append(shares, Share{Name: filepath.Base(absPath), Path: absPath})
 		}
 	} else if len(*shareSpecs) == 0 {
-		// No -n flags but have positional arg
+		// No -n flags but have positional arg: use folder name
 		absPath, err := filepath.Abs(args[0])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
 			os.Exit(1)
 		}
-		shares = append(shares, Share{Name: "share", Path: absPath})
+		shares = append(shares, Share{Name: filepath.Base(absPath), Path: absPath})
 	} else {
 		// Parse each -n flag
 		for _, spec := range *shareSpecs {
