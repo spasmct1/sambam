@@ -14,5 +14,6 @@ quickshare
 Thumbs.db
 *.zip
 
-# Release config (contains tokens)
+# Release config and script (contains tokens)
 .release-config
+release.sh
