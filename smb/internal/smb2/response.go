@@ -809,7 +809,7 @@ func (c *CreateResponse) Encode(pkt []byte) {
 	off := 88
 
 	var ctx []byte
-	var next int
+	var prevOff int
 
 	for i, c := range c.Contexts {
 		off = Roundup(off, 8)
@@ -817,16 +817,15 @@ func (c *CreateResponse) Encode(pkt []byte) {
 		if i == 0 {
 			le.PutUint32(res[80:84], uint32(64+off)) // CreateContextsOffset
 		} else {
-			le.PutUint32(ctx[:4], uint32(next)) // Next
+			le.PutUint32(ctx[:4], uint32(off-prevOff)) // Next (includes alignment padding)
 		}
 
+		prevOff = off
 		ctx = res[off:]
 
 		c.Encode(ctx)
 
-		next = c.Size()
-
-		off += next
+		off += c.Size()
 	}
 
 	le.PutUint32(res[84:88], uint32(off-88)) // CreateContextsLength
@@ -1769,6 +1768,34 @@ func (r *LeaseResponse2) Encode(pkt []byte) {
 	r.LeaseResponse.Encode(pkt)
 	copy(pkt[32:], r.ParentLeaseKey[:])
 	le.PutUint16(pkt[48:], r.Epoch)
+}
+
+// SMB2 POSIX create context tag (16-byte GUID)
+var SMB2_CREATE_TAG_POSIX = []byte{
+	0x93, 0xAD, 0x25, 0x50, 0x9C, 0xB4, 0x11, 0xE7,
+	0xB4, 0x23, 0x83, 0xDE, 0x96, 0x8B, 0xCD, 0x7C,
+}
+
+// PosixCreateResponse is returned in POSIX create context response.
+// Layout: nlinks(4) + reparse_tag(4) + mode(4) + owner_sid(var) + group_sid(var)
+type PosixCreateResponse struct {
+	Nlinks     uint32
+	ReparseTag uint32
+	Mode       uint32
+	OwnerSid   []byte // pre-encoded SID bytes
+	GroupSid   []byte // pre-encoded SID bytes
+}
+
+func (r *PosixCreateResponse) Size() int {
+	return 12 + len(r.OwnerSid) + len(r.GroupSid)
+}
+
+func (r *PosixCreateResponse) Encode(pkt []byte) {
+	le.PutUint32(pkt[0:4], r.Nlinks)
+	le.PutUint32(pkt[4:8], r.ReparseTag)
+	le.PutUint32(pkt[8:12], r.Mode)
+	copy(pkt[12:], r.OwnerSid)
+	copy(pkt[12+len(r.OwnerSid):], r.GroupSid)
 }
 
 type DiskIdResponse struct {

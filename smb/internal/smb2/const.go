@@ -119,6 +119,9 @@ const (
 	SMB2_COMPRESSION_CAPABILITIES
 )
 
+// POSIX extensions negotiate context type
+const SMB2_POSIX_EXTENSIONS_AVAILABLE = 0x0100
+
 // HashAlgorithms
 const (
 	SHA512 = 0x1

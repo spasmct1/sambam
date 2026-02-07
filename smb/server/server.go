@@ -681,6 +681,9 @@ func (n *ServerNegotiator) negotiate(conn *conn, pkt []byte) error {
 			default:
 				return &InvalidResponseError{"unknown cipher algorithm"}
 			}
+		case SMB2_POSIX_EXTENSIONS_AVAILABLE:
+			conn.posixExtensions = true
+			log.Debugf("POSIX extensions negotiated")
 		default:
 			// skip unsupported context
 		}
@@ -746,6 +749,10 @@ func (n *ServerNegotiator) makeResponse(conn *conn) (*NegotiateResponse, error) 
 			}
 
 			rsp.Contexts = append(rsp.Contexts, hc, cc, crc)
+
+			if conn.posixExtensions {
+				rsp.Contexts = append(rsp.Contexts, &PosixContext{})
+			}
 		default:
 			return nil, &InternalError{"unsupported dialect specified"}
 		}

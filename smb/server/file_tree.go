@@ -265,7 +265,9 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 	cc := r.CreateContexts()
 	for len(cc) > 0 {
 		res := CreateContextDecoder(cc)
-		switch res.Name() {
+		ccName := res.Name()
+		log.Debugf("create context: name=%q len=%d", ccName, len(ccName))
+		switch ccName {
 		case "MxAc":
 			if enc, err := t.handleMaxAccessCC(attrs); err == nil {
 				rsp.Contexts = append(rsp.Contexts, enc)
@@ -286,6 +288,14 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		case "QFid":
 			if enc, err := t.handleQFid(res.Buffer(), open); err == nil {
 				rsp.Contexts = append(rsp.Contexts, enc)
+			}
+		default:
+			// Check for POSIX create context (16-byte GUID tag)
+			if t.session.conn.posixExtensions && len(ccName) == 16 && ccName == string(SMB2_CREATE_TAG_POSIX) {
+				log.Debugf("POSIX create context matched")
+				if enc, err := t.handlePosixCC(attrs); err == nil {
+					rsp.Contexts = append(rsp.Contexts, enc)
+				}
 			}
 		}
 
@@ -425,6 +435,37 @@ func (t *fileTree) handleAAPLCC(pkt []byte) (Encoder, error) {
 	}
 
 	return nil, fmt.Errorf("not supported command")
+}
+
+func (t *fileTree) handlePosixCC(attrs *vfs.Attributes) (Encoder, error) {
+	uid, _ := attrs.GetUID()
+	gid, _ := attrs.GetGID()
+	mode, _ := attrs.GetUnixMode()
+	nlinks := attrs.GetLinkCount()
+
+	ownerSid := PosixSIDFromUid(uid)
+	groupSid := PosixSIDFromGid(gid)
+
+	ownerBuf := make([]byte, ownerSid.Size())
+	ownerSid.Encode(ownerBuf)
+	groupBuf := make([]byte, groupSid.Size())
+	groupSid.Encode(groupBuf)
+
+	reparseTag := uint32(0)
+	if attrs.GetFileType() == vfs.FileTypeSymlink {
+		reparseTag = IO_REPARSE_TAG_SYMLINK
+	}
+
+	return &CreateContext{
+		Name: string(SMB2_CREATE_TAG_POSIX),
+		Data: &PosixCreateResponse{
+			Nlinks:     nlinks,
+			ReparseTag: reparseTag,
+			Mode:       mode,
+			OwnerSid:   ownerBuf,
+			GroupSid:   groupBuf,
+		},
+	}, nil
 }
 
 func (t *fileTree) handleMaxAccessCC(attrs *vfs.Attributes) (Encoder, error) {
@@ -1120,6 +1161,45 @@ func newFileNamesInformationInfo(d vfs.DirInfo) FileNamesInformationInfo {
 	return info
 }
 
+func newFilePosixDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) *FilePosixDirectoryInformationInfo {
+	uid, _ := d.Attributes.GetUID()
+	gid, _ := d.Attributes.GetGID()
+	mode, _ := d.Attributes.GetUnixMode()
+	nlinks := d.Attributes.GetLinkCount()
+
+	ownerSid := PosixSIDFromUid(uid)
+	groupSid := PosixSIDFromGid(gid)
+	ownerBuf := make([]byte, ownerSid.Size())
+	ownerSid.Encode(ownerBuf)
+	groupBuf := make([]byte, groupSid.Size())
+	groupSid.Encode(groupBuf)
+
+	reparseTag := uint32(0)
+	if d.Attributes.GetFileType() == vfs.FileTypeSymlink {
+		reparseTag = IO_REPARSE_TAG_SYMLINK
+	}
+
+	info := &FilePosixDirectoryInformationInfo{
+		FileName:  d.Name,
+		Inode:     d.GetInodeNumber(),
+		Mode:      mode,
+		HardLinks: nlinks,
+		ReparseTag: reparseTag,
+		OwnerSid:  ownerBuf,
+		GroupSid:  groupBuf,
+	}
+
+	info.CreationTime = *BirthTimeFromVfs(&d.Attributes)
+	info.LastAccessTime = *AccessTimeFromVfs(&d.Attributes)
+	info.LastWriteTime = *ModifiedTimeFromVfs(&d.Attributes)
+	info.ChangeTime = *ChangeTimeFromVfs(&d.Attributes)
+	info.EndOfFile = SizeFromVfs(&d.Attributes)
+	info.AllocationSize = DiskSizeFromVfs(&d.Attributes)
+	info.DosAttributes = PermissionsFromVfs(&d.Attributes, d.Name, hideDotfiles)
+
+	return info
+}
+
 func (t *fileTree) makeItem(class uint8, d vfs.DirInfo) Encoder {
 	hideDotfiles := t.conn.serverCtx.hideDotfiles
 	switch class {
@@ -1140,6 +1220,8 @@ func (t *fileTree) makeItem(class uint8, d vfs.DirInfo) Encoder {
 		return newFileIdFullDirectoryInformationInfo(d, hideDotfiles)
 	case FileIdAllExtdBothDirectoryInformation:
 		return newFileIdAllExtdBothDirectoryInformationInfo(d, hideDotfiles)
+	case FilePosixInformation:
+		return newFilePosixDirectoryInformationInfo(d, hideDotfiles)
 	default:
 		log.Warningf("bad info class %d", class)
 	}
@@ -1157,7 +1239,7 @@ func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
 	switch r.FileInfoClass() {
 	case FileIdBothDirectoryInformation, FileFullDirectoryInformation, FileNamesInformation,
 		FileDirectoryInformation, FileIdFullDirectoryInformation, FileBothDirectoryInformation,
-		FileIdAllExtdBothDirectoryInformation:
+		FileIdAllExtdBothDirectoryInformation, FilePosixInformation:
 		break
 	default:
 		log.Errorf("wrong info class %d", r.FileInfoClass())
@@ -1579,6 +1661,7 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 			StandardInformation: FileStandardInformationInfo{
 				EndOfFile:      int64(SizeFromVfs(a)),
 				AllocationSize: int64(DiskSizeFromVfs(a)),
+				NumberOfLinks:  a.GetLinkCount(),
 				Directory:      isDir,
 			},
 			Internal: FileInternalInformationInfo{
@@ -1659,6 +1742,41 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 	case FileInternalInformation:
 		info = &FileInternalInformationInfo{
 			int64(a.GetInodeNumber()),
+		}
+	case FilePosixInformation:
+		if !t.session.conn.posixExtensions {
+			rsp := new(ErrorResponse)
+			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+			return c.sendPacket(rsp, &t.treeConn, ctx)
+		}
+		uid, _ := a.GetUID()
+		gid, _ := a.GetGID()
+		mode, _ := a.GetUnixMode()
+		nlinks := a.GetLinkCount()
+		ownerSid := PosixSIDFromUid(uid)
+		groupSid := PosixSIDFromGid(gid)
+		ownerBuf := make([]byte, ownerSid.Size())
+		ownerSid.Encode(ownerBuf)
+		groupBuf := make([]byte, groupSid.Size())
+		groupSid.Encode(groupBuf)
+		reparseTag := uint32(0)
+		if a.GetFileType() == vfs.FileTypeSymlink {
+			reparseTag = IO_REPARSE_TAG_SYMLINK
+		}
+		info = &PosixFileInfo{
+			CreationTime:   *BirthTimeFromVfs(a),
+			LastAccessTime: *AccessTimeFromVfs(a),
+			LastWriteTime:  *ModifiedTimeFromVfs(a),
+			ChangeTime:     *ChangeTimeFromVfs(a),
+			EndOfFile:      int64(SizeFromVfs(a)),
+			AllocationSize: int64(DiskSizeFromVfs(a)),
+			DosAttributes:  PermissionsFromVfs(a, open.pathName, t.conn.serverCtx.hideDotfiles),
+			Inode:          a.GetInodeNumber(),
+			HardLinks:      nlinks,
+			ReparseTag:     reparseTag,
+			Mode:           mode,
+			OwnerSid:       ownerBuf,
+			GroupSid:       groupBuf,
 		}
 	default:
 		log.Error("unsupported type")
@@ -1972,27 +2090,128 @@ func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) 
 	res, _ := accept(SMB2_SET_INFO, pkt)
 	r := SetInfoRequestDecoder(res)
 	sd := SecurityDescriptorDecoder(r.Buffer())
-	daclBuf := sd.Dacl()
 
-	// Try to extract NFS mode SID if DACL is present
-	if daclBuf != nil {
+	a := &vfs.Attributes{}
+	changed := false
+
+	// Check Owner SID for POSIX uid (S-1-22-1-<uid>) or NFS uid (S-1-5-88-1-<uid>)
+	if ownerBuf := sd.OwnerSid(); ownerBuf != nil {
+		sid := SidDecoder(ownerBuf)
+		if !sid.IsInvalid() {
+			subs := sid.SubAuthority()
+			log.Debugf("setSecInfo: owner SID auth=%d subs=%v", sid.IdentifierAuthority(), subs)
+			if sid.IdentifierAuthority() == 22 && sid.SubAuthorityCount() == 2 && subs[0] == 1 {
+				a.SetUID(subs[1])
+				changed = true
+			} else if sid.IdentifierAuthority() == 5 && sid.SubAuthorityCount() == 3 && subs[0] == 88 && subs[1] == 1 {
+				a.SetUID(subs[2])
+				changed = true
+			}
+		}
+	} else {
+		log.Debugf("setSecInfo: no owner SID")
+	}
+
+	// Check Group SID for POSIX gid (S-1-22-2-<gid>) or NFS gid (S-1-5-88-2-<gid>)
+	if groupBuf := sd.GroupSid(); groupBuf != nil {
+		sid := SidDecoder(groupBuf)
+		if !sid.IsInvalid() {
+			subs := sid.SubAuthority()
+			log.Debugf("setSecInfo: group SID auth=%d subs=%v", sid.IdentifierAuthority(), subs)
+			if sid.IdentifierAuthority() == 22 && sid.SubAuthorityCount() == 2 && subs[0] == 2 {
+				a.SetGID(subs[1])
+				changed = true
+			} else if sid.IdentifierAuthority() == 5 && sid.SubAuthorityCount() == 3 && subs[0] == 88 && subs[1] == 2 {
+				a.SetGID(subs[2])
+				changed = true
+			}
+		}
+	} else {
+		log.Debugf("setSecInfo: no group SID")
+	}
+
+	// Try to extract NFS mode SID from DACL or convert standard ACLs to mode
+	if daclBuf := sd.Dacl(); daclBuf != nil {
 		dacl := AclDecoder(daclBuf)
+		log.Debugf("setSecInfo: DACL with %d ACEs", dacl.AceCount())
 		aceBuf := dacl.Aces()
+		foundNfsMode := false
 		for i := 0; i < int(dacl.AceCount()); i++ {
 			ace := AceDecoder(aceBuf)
 			sidBuf := ace.Sid()
 			sid := SidDecoder(sidBuf)
-			if sid.SubAuthorityCount() == 3 && sid.SubAuthority()[0] == 88 && sid.SubAuthority()[1] == 3 {
-				// NFS Mode Sid - try to apply Unix permissions
-				mode := sid.SubAuthority()[2]
-				a := &vfs.Attributes{}
-				a.SetUnixMode(mode | 0600) // Owner can always read/write
-				// Ignore errors - we still accept the security descriptor
-				t.fs.SetAttr(vfs.VfsHandle(fileId.HandleId()), a)
+			subs := sid.SubAuthority()
+			log.Debugf("setSecInfo: ACE[%d] type=%d mask=0x%x auth=%d subs=%v", i, ace.Type(), ace.Mask(), sid.IdentifierAuthority(), subs)
+			if sid.SubAuthorityCount() == 3 && subs[0] == 88 && subs[1] == 3 {
+				// NFS Mode Sid - apply Unix permissions
+				mode := subs[2]
+				log.Debugf("setSecInfo: NFS mode SID found, mode=0%o", mode)
+				a.SetUnixMode(mode)
+				changed = true
+				foundNfsMode = true
 				break
 			}
 			aceBuf = aceBuf[ace.Size():]
 		}
+		if !foundNfsMode {
+			log.Debugf("setSecInfo: no NFS mode SID, deriving mode from ACE masks")
+			// Derive Unix mode from standard Windows ACE access masks
+			ownerMode := uint32(0)
+			groupMode := uint32(0)
+			otherMode := uint32(0)
+			derivedMode := false
+			aceBuf2 := dacl.Aces()
+			for i := 0; i < int(dacl.AceCount()); i++ {
+				ace2 := AceDecoder(aceBuf2)
+				if ace2.Type() == ACCESS_ALLOWED_ACE_TYPE {
+					sid2 := SidDecoder(ace2.Sid())
+					subs2 := sid2.SubAuthority()
+					mask := ace2.Mask()
+					bits := uint32(0)
+					if mask&0x01 != 0 {
+						bits |= 4
+					} // FILE_READ_DATA → read
+					if mask&0x02 != 0 {
+						bits |= 2
+					} // FILE_WRITE_DATA → write
+					if mask&0x20 != 0 {
+						bits |= 1
+					} // FILE_EXECUTE → execute
+					auth := sid2.IdentifierAuthority()
+					cnt := sid2.SubAuthorityCount()
+					if auth == 5 && cnt == 3 && subs2[0] == 88 && subs2[1] == 1 {
+						ownerMode = bits
+						derivedMode = true
+					} else if auth == 22 && cnt == 2 && subs2[0] == 1 {
+						ownerMode = bits
+						derivedMode = true
+					} else if auth == 5 && cnt == 3 && subs2[0] == 88 && subs2[1] == 2 {
+						groupMode = bits
+						derivedMode = true
+					} else if auth == 22 && cnt == 2 && subs2[0] == 2 {
+						groupMode = bits
+						derivedMode = true
+					} else if auth == 1 && cnt == 1 && subs2[0] == 0 {
+						otherMode = bits
+						derivedMode = true
+					}
+				}
+				aceBuf2 = aceBuf2[ace2.Size():]
+			}
+			if derivedMode {
+				mode := (ownerMode << 6) | (groupMode << 3) | otherMode
+				log.Debugf("setSecInfo: derived mode=0%o (owner=%d group=%d other=%d)", mode, ownerMode, groupMode, otherMode)
+				a.SetUnixMode(mode)
+				changed = true
+			}
+		}
+	} else {
+		log.Debugf("setSecInfo: no DACL")
+	}
+
+	log.Debugf("setSecInfo: changed=%v", changed)
+	if changed {
+		t.fs.SetAttr(vfs.VfsHandle(fileId.HandleId()), a)
 	}
 
 	// Accept security descriptor even if we can't fully preserve NTFS ACLs
@@ -2000,6 +2219,74 @@ func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) 
 	rsp := &SetInfoResponse{}
 	PrepareResponse(&rsp.PacketHeader, pkt, 0)
 
+	return c.sendPacket(rsp, &t.treeConn, ctx)
+}
+
+func (t *fileTree) setPosixInfo(ctx *compoundContext, fileId *FileId, pkt []byte) error {
+	log.Debugf("setPosixInfo")
+	c := t.session.conn
+
+	res, _ := accept(SMB2_SET_INFO, pkt)
+	r := SetInfoRequestDecoder(res)
+	buf := r.Buffer()
+
+	a := &vfs.Attributes{}
+	changed := false
+
+	// POSIX info layout: 80 bytes fixed + variable SIDs
+	// Offset 76: Mode (uint32)
+	if len(buf) >= 80 {
+		mode := le.Uint32(buf[76:80])
+		if mode != 0 {
+			a.SetUnixMode(mode)
+			changed = true
+		}
+	}
+
+	// Offset 80+: OwnerSid then GroupSid (variable length)
+	if len(buf) > 80 {
+		sidBuf := buf[80:]
+		// Parse owner SID
+		if len(sidBuf) >= 8 {
+			subCount := int(sidBuf[1])
+			sidSize := 8 + subCount*4
+			if len(sidBuf) >= sidSize {
+				sid := SidDecoder(sidBuf[:sidSize])
+				if !sid.IsInvalid() {
+					subs := sid.SubAuthority()
+					if sid.IdentifierAuthority() == 22 && subCount == 2 && subs[0] == 1 {
+						a.SetUID(subs[1])
+						changed = true
+					}
+				}
+				sidBuf = sidBuf[sidSize:]
+			}
+		}
+		// Parse group SID
+		if len(sidBuf) >= 8 {
+			subCount := int(sidBuf[1])
+			sidSize := 8 + subCount*4
+			if len(sidBuf) >= sidSize {
+				sid := SidDecoder(sidBuf[:sidSize])
+				if !sid.IsInvalid() {
+					subs := sid.SubAuthority()
+					if sid.IdentifierAuthority() == 22 && subCount == 2 && subs[0] == 2 {
+						a.SetGID(subs[1])
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
+	if changed {
+		if _, err := t.fs.SetAttr(vfs.VfsHandle(fileId.HandleId()), a); err != nil {
+			log.Errorf("setPosixInfo: SetAttr failed: %v", err)
+		}
+	}
+
+	rsp := &SetInfoResponse{}
+	PrepareResponse(&rsp.PacketHeader, pkt, 0)
 	return c.sendPacket(rsp, &t.treeConn, ctx)
 }
 
@@ -2059,6 +2346,8 @@ func (t *fileTree) setInfo(ctx *compoundContext, pkt []byte) error {
 			return t.setRename(ctx, fileId, pkt)
 		}
 		status = uint32(STATUS_NOT_SUPPORTED)
+	case FilePosixInformation:
+		return t.setPosixInfo(ctx, fileId, pkt)
 	case FileAllocationInformation:
 		rsp := &SetInfoResponse{}
 		PrepareResponse(&rsp.PacketHeader, pkt, 0)

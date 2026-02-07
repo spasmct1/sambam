@@ -158,6 +158,20 @@ func (c *CompressionContext) Encode(p []byte) {
 	}
 }
 
+// POSIX extensions negotiate context (SMB 3.1.1)
+
+type PosixContext struct{}
+
+func (c *PosixContext) Size() int {
+	return 10 // 8 header + 2 data
+}
+
+func (c *PosixContext) Encode(p []byte) {
+	le.PutUint16(p[:2], SMB2_POSIX_EXTENSIONS_AVAILABLE) // ContextType
+	le.PutUint16(p[2:4], 2)                              // DataLength
+	le.PutUint16(p[8:10], 1)                              // Version = 1
+}
+
 // From SMB311
 
 type NegotiateContextDecoder []byte

@@ -36,7 +36,7 @@ Done. They open `\\your-ip\share` in Explorer. Files are flowing. You're a hero.
 - **Auto-expire** - Automatically stop sharing after a set time
 - **Config file** - Save your settings in `~/.sambamrc`
 - **Cross-platform clients** - Works with Windows 10/11, macOS, and Linux (CIFS mount)
-- **SMB 2.1 / 3.0** - Compatible with modern SMB protocol versions
+- **SMB 2.1 / 3.0 / 3.1.1** - Compatible with modern SMB protocol versions, including POSIX extensions
 - **Single binary** - Runs on any Linux distribution (Debian, Ubuntu, OpenWrt, etc.)
 - **Daemon mode** - Run in background, stop when done
 
@@ -242,6 +242,17 @@ sudo mount -t cifs //server-ip/share /mnt/share -o guest,vers=3.0
 # With authentication
 sudo mount -t cifs //server-ip/share /mnt/share -o username=admin,password=secret123,vers=3.0
 ```
+
+### POSIX extensions (real Unix permissions)
+
+sambam supports SMB2 POSIX extensions, which let Linux clients see real Unix permissions, owners, and use `chmod`/`chown`. This requires SMB 3.1.1:
+
+```bash
+# POSIX mount with chmod/chown support
+sudo mount -t cifs //server-ip/share /mnt/share -o guest,vers=3.1.1,posix,cifsacl
+```
+
+With POSIX extensions, `ls -la` shows actual file owners and permissions from the server instead of defaults. The `cifsacl` option is required on kernel 6.1 for `chmod` to work; newer kernels (6.5+) may not need it.
 
 ## Windows Credential Troubleshooting
 

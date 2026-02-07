@@ -996,3 +996,108 @@ func (i *FileFsObjectIdInfo) Size() int {
 func (i *FileFsObjectIdInfo) Encode(pkt []byte) {
 	i.ObjectId.Encode(pkt[:])
 }
+
+// FilePosixDirectoryInformationInfo encodes a POSIX directory entry (QueryDirectory info class 0x64).
+// Layout (88 bytes fixed + variable SIDs + 4 byte name length + UTF-16LE name):
+//
+//	 0: NextEntryOffset(4) FileIndex(4)
+//	 8: CreationTime(8) LastAccessTime(8) LastWriteTime(8) ChangeTime(8)
+//	40: EndOfFile(8) AllocationSize(8)
+//	56: DosAttributes(4) Inode(8) DeviceId(4) Zero(4)
+//	76: HardLinks(4) ReparseTag(4) Mode(4)
+//	88: OwnerSid(var) GroupSid(var) FileNameLength(4) FileName(var)
+type FilePosixDirectoryInformationInfo struct {
+	NextEntryOffset uint32
+	FileIndex       uint32
+	CreationTime    Filetime
+	LastAccessTime  Filetime
+	LastWriteTime   Filetime
+	ChangeTime      Filetime
+	EndOfFile       uint64
+	AllocationSize  uint64
+	DosAttributes   uint32
+	Inode           uint64
+	DeviceId        uint32
+	HardLinks       uint32
+	ReparseTag      uint32
+	Mode            uint32
+	OwnerSid        []byte
+	GroupSid        []byte
+	FileName        string
+}
+
+func (i *FilePosixDirectoryInformationInfo) Size() int {
+	return Align(88+len(i.OwnerSid)+len(i.GroupSid)+4+utf16le.EncodedStringLen(i.FileName), 8)
+}
+
+func (i *FilePosixDirectoryInformationInfo) Encode(pkt []byte) {
+	le.PutUint32(pkt[0:], i.NextEntryOffset)
+	le.PutUint32(pkt[4:], i.FileIndex)
+	i.CreationTime.Encode(pkt[8:])
+	i.LastAccessTime.Encode(pkt[16:])
+	i.LastWriteTime.Encode(pkt[24:])
+	i.ChangeTime.Encode(pkt[32:])
+	le.PutUint64(pkt[40:], i.EndOfFile)
+	le.PutUint64(pkt[48:], i.AllocationSize)
+	le.PutUint32(pkt[56:], i.DosAttributes)
+	le.PutUint64(pkt[60:], i.Inode)
+	le.PutUint32(pkt[68:], i.DeviceId)
+	le.PutUint32(pkt[72:], 0) // Zero/reserved
+	le.PutUint32(pkt[76:], i.HardLinks)
+	le.PutUint32(pkt[80:], i.ReparseTag)
+	le.PutUint32(pkt[84:], i.Mode)
+	off := 88
+	copy(pkt[off:], i.OwnerSid)
+	off += len(i.OwnerSid)
+	copy(pkt[off:], i.GroupSid)
+	off += len(i.GroupSid)
+	le.PutUint32(pkt[off:], uint32(utf16le.EncodedStringLen(i.FileName)))
+	utf16le.EncodeString(pkt[off+4:], i.FileName)
+}
+
+// PosixFileInfo encodes SMB2_FILE_POSIX_INFORMATION (info class 0x64).
+// Layout (80 bytes fixed + variable SIDs):
+//
+//	 0: CreationTime(8) LastAccessTime(8) LastWriteTime(8) ChangeTime(8)
+//	32: EndOfFile(8) AllocationSize(8)
+//	48: DosAttributes(4) Inode(8) DeviceId(4) Zero(4)
+//	68: HardLinks(4) ReparseTag(4) Mode(4)
+//	80: OwnerSid(var) GroupSid(var)
+type PosixFileInfo struct {
+	CreationTime   Filetime
+	LastAccessTime Filetime
+	LastWriteTime  Filetime
+	ChangeTime     Filetime
+	EndOfFile      int64
+	AllocationSize int64
+	DosAttributes  uint32
+	Inode          uint64
+	DeviceId       uint32
+	HardLinks      uint32
+	ReparseTag     uint32
+	Mode           uint32
+	OwnerSid       []byte
+	GroupSid       []byte
+}
+
+func (i *PosixFileInfo) Size() int {
+	return 80 + len(i.OwnerSid) + len(i.GroupSid)
+}
+
+func (i *PosixFileInfo) Encode(pkt []byte) {
+	i.CreationTime.Encode(pkt[0:])
+	i.LastAccessTime.Encode(pkt[8:])
+	i.LastWriteTime.Encode(pkt[16:])
+	i.ChangeTime.Encode(pkt[24:])
+	le.PutUint64(pkt[32:], uint64(i.EndOfFile))
+	le.PutUint64(pkt[40:], uint64(i.AllocationSize))
+	le.PutUint32(pkt[48:], i.DosAttributes)
+	le.PutUint64(pkt[52:], i.Inode)
+	le.PutUint32(pkt[60:], i.DeviceId)
+	le.PutUint32(pkt[64:], 0) // Zero/reserved
+	le.PutUint32(pkt[68:], i.HardLinks)
+	le.PutUint32(pkt[72:], i.ReparseTag)
+	le.PutUint32(pkt[76:], i.Mode)
+	copy(pkt[80:], i.OwnerSid)
+	copy(pkt[80+len(i.OwnerSid):], i.GroupSid)
+}

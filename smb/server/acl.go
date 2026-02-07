@@ -101,6 +101,25 @@ func SIDFromGid(gid uint32) *SID {
 	}
 }
 
+// POSIX SID authority (22) — used by Linux CIFS client for uid/gid mapping
+var POSIX_SID_AUTHORITY = SID_IDENTIFIER_AUTHORITY{0x00, 0x00, 0x00, 0x00, 0x00, 0x16} // 22
+
+// PosixSIDFromUid returns S-1-22-1-<uid>
+func PosixSIDFromUid(uid uint32) *SID {
+	return &SID{
+		IdentifierAuthority: POSIX_SID_AUTHORITY,
+		SubAuthority:        []uint32{1, uid},
+	}
+}
+
+// PosixSIDFromGid returns S-1-22-2-<gid>
+func PosixSIDFromGid(gid uint32) *SID {
+	return &SID{
+		IdentifierAuthority: POSIX_SID_AUTHORITY,
+		SubAuthority:        []uint32{2, gid},
+	}
+}
+
 func SIDFromMode(mode uint32) *SID {
 	return &SID{
 		IdentifierAuthority: SECURITY_NT_AUTHORITY,

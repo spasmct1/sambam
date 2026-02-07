@@ -98,7 +98,21 @@ func (fs *PassthroughFS) SetAttr(handle vfs.VfsHandle, a *vfs.Attributes) (*vfs.
 	}
 
 	if mode, mSet := a.GetUnixMode(); mSet {
-		os.Chmod(open.path, os.FileMode(mode))
+		os.Chmod(open.path, os.FileMode(mode&0777))
+	}
+
+	uid, uidSet := a.GetUID()
+	gid, gidSet := a.GetGID()
+	if uidSet || gidSet {
+		chownUid := -1
+		chownGid := -1
+		if uidSet {
+			chownUid = int(uid)
+		}
+		if gidSet {
+			chownGid = int(gid)
+		}
+		os.Chown(open.path, chownUid, chownGid)
 	}
 
 	return nil, nil
@@ -483,6 +497,9 @@ func fileInfoToAttr(stat os.FileInfo) (*vfs.Attributes, error) {
 	a.SetDiskSizeBytes(uint64(sysStat.Blocks * 512))
 	a.SetUnixMode(uint32(stat.Mode()))
 	a.SetPermissions(vfs.NewPermissionsFromMode(uint32(stat.Mode().Perm())))
+	a.SetUID(sysStat.Uid)
+	a.SetGID(sysStat.Gid)
+	a.SetLinkCount(sysStat.Nlink)
 	a.SetAccessTime(sysStat.Atime)
 	a.SetLastDataModificationTime(stat.ModTime())
 	a.SetBirthTime(sysStat.Btime)
