@@ -264,7 +264,7 @@ func (conn *conn) runReciever() {
 			p := PacketCodec(pkt)
 			if s := conn.session; s != nil {
 				if p.Command() != SMB2_NEGOTIATE && p.Command() != SMB2_SESSION_SETUP &&
-					s.sessionId != p.SessionId() {
+					p.Command() != SMB2_ECHO && s.sessionId != p.SessionId() {
 					log.Debugf("skip: unknown session id (cmd %d, expected %d, got %d)", p.Command(), s.sessionId, p.SessionId())
 					continue
 				}

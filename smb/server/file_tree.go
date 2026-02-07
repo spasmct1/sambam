@@ -1352,38 +1352,48 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 
 	go func(ctx *compoundContext, reqPkt []byte, h uint64) {
 		var events []notifyEvent
-		select {
-		case ev := <-eventCh:
-			events = append(events, ev)
-			// Adaptive coalesce: wait for a quiet period (no events for 150ms),
-			// capped at 3s max. During bulk operations events keep arriving so
-			// we keep waiting, resulting in very few re-enumerations. A single
-			// server-side change (touch) only delays 150ms.
-			deadline := time.After(3 * time.Second)
-			quiet := time.NewTimer(150 * time.Millisecond)
-		coalesceLoop:
-			for {
-				select {
-				case ev = <-eventCh:
-					events = append(events, ev)
-					quiet.Reset(150 * time.Millisecond)
-				case <-quiet.C:
-					break coalesceLoop
-				case <-deadline:
-					break coalesceLoop
-				case <-cancelCh:
-					events = nil
-					break coalesceLoop
+		// Wait indefinitely for real events or cancel — like real Samba.
+		// Never send STATUS_CANCELLED on timeout (Explorer gives up after
+		// 2 consecutive STATUS_CANCELLED). Use periodic liveness checks
+		// as a safety net against goroutine leaks on unexpected disconnects.
+		for {
+			select {
+			case ev := <-eventCh:
+				events = append(events, ev)
+				// Adaptive coalesce: wait for a quiet period (no events for 150ms),
+				// capped at 3s max.
+				deadline := time.After(3 * time.Second)
+				quiet := time.NewTimer(150 * time.Millisecond)
+			coalesceLoop:
+				for {
+					select {
+					case ev = <-eventCh:
+						events = append(events, ev)
+						quiet.Reset(150 * time.Millisecond)
+					case <-quiet.C:
+						break coalesceLoop
+					case <-deadline:
+						break coalesceLoop
+					case <-cancelCh:
+						events = nil
+						break coalesceLoop
+					}
 				}
+				quiet.Stop()
+			case <-cancelCh:
+				log.Debugf("ChangeNotify: cancelled h=%d", h)
+			case <-time.After(60 * time.Second):
+				// Liveness check: if the open handle is gone (connection dropped),
+				// exit the goroutine to prevent leaks.
+				if t.conn.serverCtx.getOpen(h) == nil {
+					log.Debugf("ChangeNotify: open gone h=%d", h)
+					return
+				}
+				continue // keep waiting
 			}
-			quiet.Stop()
-		case <-cancelCh:
-			log.Debugf("ChangeNotify: cancelled h=%d", h)
-		case <-time.After(30 * time.Second):
-			log.Debugf("ChangeNotify: timeout h=%d", h)
+			break
 		}
 		if t.conn.serverCtx.getOpen(h) == nil {
-			log.Debugf("ChangeNotify: open gone h=%d", h)
 			return
 		}
 		open.notifyReq = nil
