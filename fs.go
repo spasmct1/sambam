@@ -28,8 +28,9 @@ type PassthroughFS struct {
 	openFiles sync.Map
 
 	// Debug callbacks
-	OnCreate func(path string, isDir bool)
-	OnDelete func(path string)
+	OnCreate    func(path string, isDir bool)
+	OnOverwrite func(path string)
+	OnDelete    func(path string)
 }
 
 func (fs *PassthroughFS) BasePath() string {
@@ -156,9 +157,11 @@ func (fs *PassthroughFS) Open(p string, flags int, mode int) (vfs.VfsHandle, err
 		return 0, err
 	}
 
-	// Call OnCreate if file was newly created
+	// Call OnCreate if file was newly created, OnOverwrite if replaced
 	if isCreate && existedBefore != nil && fs.OnCreate != nil {
 		fs.OnCreate(p, false)
+	} else if isCreate && existedBefore == nil && flags&os.O_TRUNC != 0 && fs.OnOverwrite != nil {
+		fs.OnOverwrite(p)
 	}
 
 	h := vfs.VfsHandle(randHandle())

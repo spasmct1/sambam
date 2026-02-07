@@ -65,6 +65,16 @@ func loadConfig() *Config {
 	return &config
 }
 
+// verboseFormatter formats logrus entries to match the callback output style:
+//
+//	16:47:19 authenticated: guest
+type verboseFormatter struct{}
+
+func (f *verboseFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	ts := Dim(entry.Time.Format("15:04:05"))
+	return []byte(fmt.Sprintf("  %s %s\n", ts, entry.Message)), nil
+}
+
 // generatePassword creates a random alphanumeric password
 func generatePassword(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -77,7 +87,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.3.2"
+	version = "1.3.3"
 )
 
 func main() {
@@ -152,9 +162,12 @@ func main() {
 		}
 	}
 
-	// Set log level - show debug output when --debug is set
+	// Set log level and formatter
 	if *debugMode {
 		logrus.SetLevel(logrus.DebugLevel)
+	} else if *verbose {
+		logrus.SetLevel(logrus.InfoLevel)
+		logrus.SetFormatter(&verboseFormatter{})
 	} else {
 		logrus.SetLevel(logrus.ErrorLevel)
 	}
@@ -317,6 +330,14 @@ func main() {
 					log.Printf("[%s] Created %s: %s", shareName, typeStr, path)
 				} else {
 					fmt.Printf("  %s %s %s %s %s\n", Dim(timestamp), Dim("["+shareName+"]"), Green("create"), Dim(typeStr), path)
+				}
+			}
+			fs.OnOverwrite = func(path string) {
+				timestamp := time.Now().Format("15:04:05")
+				if *daemonMode {
+					log.Printf("[%s] Replaced: %s", shareName, path)
+				} else {
+					fmt.Printf("  %s %s %s %s\n", Dim(timestamp), Dim("["+shareName+"]"), Yellow("replace"), path)
 				}
 			}
 			fs.OnDelete = func(path string) {

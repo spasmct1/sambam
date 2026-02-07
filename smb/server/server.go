@@ -271,6 +271,7 @@ func (d *Server) Serve(addr string) error {
 				if !isNormalDisconnect(err) {
 					log.Errorf("err: %v", err)
 				}
+				log.Infof("disconnect %s", c.RemoteAddr())
 				c.Close()
 				if d.acceptSingleConn {
 					d.active = false
@@ -542,7 +543,7 @@ func (c *conn) treeConnect(pkt []byte) error {
 			tc = &ft.treeConn
 			c.treeMapByName[path] = ft
 			c.treeMapById[tc.treeId] = ft
-			log.Debugf("new file tree %d", ft.treeId)
+			log.Infof("mounted share: %s", path)
 		}
 
 		err = c.sendPacket(rsp, tc, nil)
@@ -566,7 +567,9 @@ func (c *conn) treeDisconnect(pkt []byte) error {
 		tree = tc.getTree()
 		tree.refCount--
 		if tree.refCount == 0 {
-			log.Debugf("Deleting tree %s", tree.path)
+			if tree.path != "\\IPC$" {
+				log.Infof("unmounted share: %s", tree.path)
+			}
 			delete(c.treeMapByName, tree.path)
 			delete(c.treeMapById, tree.treeId)
 		}
@@ -865,7 +868,7 @@ func (c *conn) sessionServerSetupChallenge(pkt []byte) error {
 		return &InvalidRequestError{err.Error()}
 	}
 
-	log.Debugf("auth user: %s", user)
+	log.Infof("authenticated: %s", user)
 	flags := uint16(0)
 	if c.serverCtx.allowGuest {
 		flags = SMB2_SESSION_FLAG_IS_GUEST
@@ -1091,19 +1094,25 @@ func (d *Server) startFsWatcher() {
 				}
 
 				var action uint32
+				var actionName string
 				switch {
 				case ev.Op&fsnotify.Create != 0:
 					action = FILE_ACTION_ADDED
+					actionName = "created"
 				case ev.Op&fsnotify.Remove != 0:
 					action = FILE_ACTION_REMOVED
+					actionName = "removed"
 				case ev.Op&fsnotify.Write != 0:
 					action = FILE_ACTION_MODIFIED
+					actionName = "modified"
 				case ev.Op&fsnotify.Rename != 0:
 					action = FILE_ACTION_RENAMED_OLD_NAME
+					actionName = "renamed"
 				default:
 					continue
 				}
 
+				log.Infof("detected: %s %s", actionName, smbPath)
 				log.Debugf("fsnotify: %s action=%d smbPath=%s", ev.Name, action, smbPath)
 				d.notifyChange(smbPath, action)
 

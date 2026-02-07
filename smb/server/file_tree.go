@@ -1401,7 +1401,7 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 		// Keep notifyCh alive to buffer events between ChangeNotify cycles
 
 		if len(events) > 0 {
-			log.Debugf("ChangeNotify: sending %d events h=%d", len(events), h)
+			log.Debugf("notify: %d change(s) h=%d", len(events), h)
 			rsp := new(ChangeNotifyResponse)
 			list := make(FileNotifyInformationList, len(events))
 			for i, ev := range events {
@@ -1947,6 +1947,8 @@ func (t *fileTree) setRename(ctx *compoundContext, fileId *FileId, pkt []byte) e
 		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
+
+	log.Infof("rename: %s -> %s", open.pathName, to)
 
 	rsp := new(SetInfoResponse)
 	PrepareResponse(&rsp.PacketHeader, pkt, 0)
