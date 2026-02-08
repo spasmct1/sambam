@@ -87,7 +87,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.4.1"
+	version = "1.4.2"
 )
 
 func main() {
@@ -600,6 +600,33 @@ func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []
 	for _, share := range shares {
 		for _, ip := range displayIPs {
 			fmt.Printf("    %s\n", Cyan(fmt.Sprintf("\\\\%s%s\\%s", ip, portSuffix, share.Name)))
+		}
+	}
+	fmt.Println()
+	fmt.Println("  Connect from macOS:")
+	for _, share := range shares {
+		for _, ip := range displayIPs {
+			if portSuffix != "" {
+				fmt.Printf("    %s\n", Cyan(fmt.Sprintf("smb://%s%s/%s", ip, portSuffix, share.Name)))
+			} else {
+				fmt.Printf("    %s\n", Cyan(fmt.Sprintf("smb://%s/%s", ip, share.Name)))
+			}
+		}
+	}
+	fmt.Println()
+	fmt.Println("  Connect from Linux:")
+	authOpt := "guest"
+	if username != "" {
+		authOpt = "username=" + username + ",password=" + password
+	}
+	for _, share := range shares {
+		for _, ip := range displayIPs {
+			fmt.Printf("    %s\n", Cyan(fmt.Sprintf("sudo mount -t cifs //%s%s/%s /mnt -o %s", ip, portSuffix, share.Name, authOpt)))
+		}
+	}
+	for _, share := range shares {
+		for _, ip := range displayIPs {
+			fmt.Printf("    %s %s\n", Cyan(fmt.Sprintf("sudo mount -t cifs //%s%s/%s /mnt -o %s,vers=3.1.1,posix,cifsacl", ip, portSuffix, share.Name, authOpt)), Dim("# POSIX"))
 		}
 	}
 	fmt.Println()
