@@ -204,7 +204,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
 				os.Exit(1)
 			}
-			shares = append(shares, Share{Name: filepath.Base(absPath), Path: absPath})
+			shares = append(shares, Share{Name: shareName(absPath), Path: absPath})
 		}
 	} else if len(*shareSpecs) == 0 {
 		// No -n flags but have positional arg: use folder name
@@ -213,7 +213,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
 			os.Exit(1)
 		}
-		shares = append(shares, Share{Name: filepath.Base(absPath), Path: absPath})
+		shares = append(shares, Share{Name: shareName(absPath), Path: absPath})
 	} else {
 		// Parse each -n flag
 		for _, spec := range *shareSpecs {
@@ -700,6 +700,17 @@ func printUsage() {
 	fmt.Printf("    %s  %s\n", Cyan("sambam -d /data")+"                     ", Dim("# Run as daemon"))
 	fmt.Printf("    %s  %s\n", Cyan("sambam stop")+"                         ", Dim("# Stop running daemon"))
 	fmt.Println()
+}
+
+// shareName returns a valid share name for the given path.
+// filepath.Base("/") returns "/" which is not a valid share name,
+// so we fall back to "root" for the filesystem root.
+func shareName(path string) string {
+	name := filepath.Base(path)
+	if name == "/" || name == "." {
+		return "root"
+	}
+	return name
 }
 
 func parseHostPort(addr string) (host, port string) {
