@@ -87,7 +87,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.4.2"
+	version = "1.4.3"
 )
 
 func main() {
@@ -595,20 +595,39 @@ func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []
 		fmt.Printf("  %-12s %s\n", "Auth", Dim("anonymous"))
 	}
 
+	// Extract port number from portSuffix (":8888" -> "8888")
+	nonStdPort := portSuffix != ""
+	portNum := ""
+	if nonStdPort {
+		portNum = portSuffix[1:] // strip leading ":"
+	}
+
 	fmt.Println()
-	fmt.Println("  Connect from Windows:")
-	for _, share := range shares {
+	if nonStdPort {
+		fmt.Println("  Connect from Windows " + Dim("(requires SSH tunnel)") + ":")
 		for _, ip := range displayIPs {
-			fmt.Printf("    %s\n", Cyan(fmt.Sprintf("\\\\%s%s\\%s", ip, portSuffix, share.Name)))
+			fmt.Printf("    %s\n", Cyan(fmt.Sprintf("ssh -L 445:%s:%s user@%s", ip, portNum, ip)))
+		}
+		fmt.Printf("    %s\n", Dim("then connect to:")+" "+Cyan("\\\\localhost\\"+shares[0].Name))
+	} else {
+		fmt.Println("  Connect from Windows:")
+		for _, share := range shares {
+			for _, ip := range displayIPs {
+				fmt.Printf("    %s\n", Cyan(fmt.Sprintf("\\\\%s\\%s", ip, share.Name)))
+			}
 		}
 	}
 	fmt.Println()
-	fmt.Println("  Connect from macOS:")
-	for _, share := range shares {
+	if nonStdPort {
+		fmt.Println("  Connect from macOS " + Dim("(requires SSH tunnel)") + ":")
 		for _, ip := range displayIPs {
-			if portSuffix != "" {
-				fmt.Printf("    %s\n", Cyan(fmt.Sprintf("smb://%s%s/%s", ip, portSuffix, share.Name)))
-			} else {
+			fmt.Printf("    %s\n", Cyan(fmt.Sprintf("ssh -L 445:%s:%s user@%s", ip, portNum, ip)))
+		}
+		fmt.Printf("    %s\n", Dim("then connect to:")+" "+Cyan("smb://localhost/"+shares[0].Name))
+	} else {
+		fmt.Println("  Connect from macOS:")
+		for _, share := range shares {
+			for _, ip := range displayIPs {
 				fmt.Printf("    %s\n", Cyan(fmt.Sprintf("smb://%s/%s", ip, share.Name)))
 			}
 		}
@@ -619,14 +638,18 @@ func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []
 	if username != "" {
 		authOpt = "username=" + username + ",password=" + password
 	}
+	portOpt := ""
+	if nonStdPort {
+		portOpt = ",port=" + portNum
+	}
 	for _, share := range shares {
 		for _, ip := range displayIPs {
-			fmt.Printf("    %s\n", Cyan(fmt.Sprintf("sudo mount -t cifs //%s%s/%s /mnt -o %s", ip, portSuffix, share.Name, authOpt)))
+			fmt.Printf("    %s\n", Cyan(fmt.Sprintf("sudo mount -t cifs //%s/%s /mnt -o %s%s", ip, share.Name, authOpt, portOpt)))
 		}
 	}
 	for _, share := range shares {
 		for _, ip := range displayIPs {
-			fmt.Printf("    %s %s\n", Cyan(fmt.Sprintf("sudo mount -t cifs //%s%s/%s /mnt -o %s,vers=3.1.1,posix,cifsacl", ip, portSuffix, share.Name, authOpt)), Dim("# POSIX"))
+			fmt.Printf("    %s %s\n", Cyan(fmt.Sprintf("sudo mount -t cifs //%s/%s /mnt -o %s%s,vers=3.1.1,posix,cifsacl", ip, share.Name, authOpt, portOpt)), Dim("# POSIX"))
 		}
 	}
 	fmt.Println()

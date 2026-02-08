@@ -271,9 +271,41 @@ net use * /delete
 
 After clearing cached connections, reconnect and Windows will prompt for new credentials.
 
+## Non-standard ports
+
+Port 445 requires root. You can use a non-standard port instead:
+
+```bash
+sambam -l :8888 /data
+```
+
+**Linux clients** support non-standard ports natively:
+
+```bash
+sudo mount -t cifs //server-ip/share /mnt -o guest,port=8888
+```
+
+**Windows and macOS** only connect to port 445. To use a non-standard port, create an SSH tunnel:
+
+```bash
+# Forward local port 445 to the sambam server
+ssh -L 445:server-ip:8888 user@server-ip
+```
+
+Then connect to `\\localhost\share` (Windows) or `smb://localhost/share` (macOS).
+
+On Windows, port 445 is usually already in use by the built-in SMB service. A workaround is to run the tunnel inside WSL and bind to the WSL network interface:
+
+```bash
+# Inside WSL — find WSL's IP with: ip addr show eth0
+ssh -L 172.x.x.x:445:server-ip:8888 user@server-ip
+```
+
+Then connect from Windows using `\\172.x.x.x\share` (the WSL IP).
+
 ## Requirements
 
-- **Root privileges** - Port 445 requires root (or use `-l :8445` for non-standard port)
+- **Root privileges** - Port 445 requires root (or use `-l :8888` for a non-standard port)
 - **Linux server** - Works on any distribution (Debian, Ubuntu, OpenWrt, Alpine, etc.)
 - **Clients** - Windows 10/11, macOS, or Linux (via CIFS mount)
 
