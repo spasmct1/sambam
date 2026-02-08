@@ -87,7 +87,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.4.0"
+	version = "1.4.1"
 )
 
 func main() {
@@ -319,33 +319,32 @@ func main() {
 
 		// Setup filesystem callbacks for verbose/debug mode
 		if *verbose || *debugMode {
-			shareName := share.Name // capture for closure
 			fs.OnCreate = func(path string, isDir bool) {
 				timestamp := time.Now().Format("15:04:05")
 				typeStr := "file"
 				if isDir {
-					typeStr = "dir"
+					typeStr = "dir "
 				}
 				if *daemonMode {
-					log.Printf("[%s] Created %s: %s", shareName, typeStr, path)
+					log.Printf("create: %s %s", typeStr, path)
 				} else {
-					fmt.Printf("  %s %s %s %s %s\n", Dim(timestamp), Dim("["+shareName+"]"), Green("create"), Dim(typeStr), path)
+					fmt.Printf("  %s %s %s %s\n", Dim(timestamp), Green("create:"), Dim(typeStr), path)
 				}
 			}
 			fs.OnOverwrite = func(path string) {
 				timestamp := time.Now().Format("15:04:05")
 				if *daemonMode {
-					log.Printf("[%s] Replaced: %s", shareName, path)
+					log.Printf("replace: %s", path)
 				} else {
-					fmt.Printf("  %s %s %s %s\n", Dim(timestamp), Dim("["+shareName+"]"), Yellow("replace"), path)
+					fmt.Printf("  %s %s %s\n", Dim(timestamp), Yellow("replace:"), path)
 				}
 			}
 			fs.OnDelete = func(path string) {
 				timestamp := time.Now().Format("15:04:05")
 				if *daemonMode {
-					log.Printf("[%s] Deleted: %s", shareName, path)
+					log.Printf("delete: %s", path)
 				} else {
-					fmt.Printf("  %s %s %s %s\n", Dim(timestamp), Dim("["+shareName+"]"), Red("delete"), path)
+					fmt.Printf("  %s %s %s\n", Dim(timestamp), Red("delete:"), path)
 				}
 			}
 		}
@@ -359,15 +358,46 @@ func main() {
 		hostname = "SAMBAM"
 	}
 
-	// Setup connection callback for verbose/debug mode
+	// Setup verbose/debug callbacks
 	var onConnect func(string)
+	var onRename func(string, string)
+	var onDetect func(string, string)
 	if *verbose || *debugMode {
 		onConnect = func(remoteAddr string) {
 			timestamp := time.Now().Format("15:04:05")
 			if *daemonMode {
-				log.Printf("Connection from %s", remoteAddr)
+				log.Printf("connect: %s", remoteAddr)
 			} else {
-				fmt.Printf("  %s %s %s\n", Dim(timestamp), Green("connect"), remoteAddr)
+				fmt.Printf("  %s %s %s\n", Dim(timestamp), Green("connect:"), remoteAddr)
+			}
+		}
+		onRename = func(from, to string) {
+			timestamp := time.Now().Format("15:04:05")
+			if *daemonMode {
+				log.Printf("rename: %s -> %s", from, to)
+			} else {
+				fmt.Printf("  %s %s %s %s %s\n", Dim(timestamp), Cyan("rename:"), from, Dim("->"), to)
+			}
+		}
+		onDetect = func(action, path string) {
+			timestamp := time.Now().Format("15:04:05")
+			var coloredAction string
+			switch action {
+			case "created":
+				coloredAction = Green("detected:") + " " + Green(action)
+			case "removed":
+				coloredAction = Red("detected:") + " " + Red(action)
+			case "modified":
+				coloredAction = Yellow("detected:") + " " + Yellow(action)
+			case "renamed":
+				coloredAction = Cyan("detected:") + " " + Cyan(action)
+			default:
+				coloredAction = "detected: " + action
+			}
+			if *daemonMode {
+				log.Printf("detected: %s %s", action, path)
+			} else {
+				fmt.Printf("  %s %s %s\n", Dim(timestamp), coloredAction, path)
 			}
 		}
 	}
@@ -389,8 +419,11 @@ func main() {
 	srv := smb2.NewServer(
 		&smb2.ServerConfig{
 			AllowGuest:   allowGuest,
+			Xatrrs:       true,
 			HideDotfiles: *hideDotfiles,
 			OnConnect:    onConnect,
+			OnRename:     onRename,
+			OnDetect:     onDetect,
 		},
 		&smb2.NTLMAuthenticator{
 			TargetSPN:    "",

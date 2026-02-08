@@ -1295,6 +1295,10 @@ func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
 				accSize := 0
 				var unconsumed []vfs.DirInfo
 				for i, d := range dir {
+					// Hide macOS AppleDouble and .DS_Store files when AAPL extensions are active
+					if t.aaplExtensions && (strings.HasPrefix(d.Name, "._") || d.Name == ".DS_Store") {
+						continue
+					}
 					if MatchWildcard(d.Name, r.FileName()) {
 						info := t.makeItem(r.FileInfoClass(), d)
 						entrySize := info.Size()
@@ -2066,7 +2070,11 @@ func (t *fileTree) setRename(ctx *compoundContext, fileId *FileId, pkt []byte) e
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
-	log.Infof("rename: %s -> %s", open.pathName, to)
+	if t.conn.serverCtx.onRename != nil {
+		t.conn.serverCtx.onRename(open.pathName, to)
+	} else {
+		log.Infof("rename: %s -> %s", open.pathName, to)
+	}
 
 	rsp := new(SetInfoResponse)
 	PrepareResponse(&rsp.PacketHeader, pkt, 0)

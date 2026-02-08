@@ -62,6 +62,8 @@ type Server struct {
 	acceptSingleConn bool
 
 	onConnect func(remoteAddr string)
+	onRename  func(from, to string)
+	onDetect  func(action, path string)
 
 	fsWatcher   *fsnotify.Watcher
 	fsWatchRefs map[string]int
@@ -163,8 +165,10 @@ type ServerConfig struct {
 	Xatrrs           bool
 	IgnoreSetAttrErr bool
 	AcceptSingleConn bool
-	HideDotfiles     bool                    // Hide files starting with '.'
-	OnConnect        func(remoteAddr string) // Called when a client connects
+	HideDotfiles     bool                         // Hide files starting with '.'
+	OnConnect        func(remoteAddr string)       // Called when a client connects
+	OnRename         func(from, to string)         // Called on file rename
+	OnDetect         func(action, path string)     // Called on fsnotify event
 }
 
 func NewServer(cfg *ServerConfig, a Authenticator, shares map[string]vfs.VFSFileSystem) *Server {
@@ -187,6 +191,8 @@ func NewServer(cfg *ServerConfig, a Authenticator, shares map[string]vfs.VFSFile
 		activeConns:      map[*conn]struct{}{},
 		acceptSingleConn: cfg.AcceptSingleConn,
 		onConnect:        cfg.OnConnect,
+		onRename:         cfg.OnRename,
+		onDetect:         cfg.OnDetect,
 		fsWatchRefs:      map[string]int{},
 		fsWatchRoot:      map[string]string{},
 	}
@@ -1119,7 +1125,11 @@ func (d *Server) startFsWatcher() {
 					continue
 				}
 
-				log.Infof("detected: %s %s", actionName, smbPath)
+				if d.onDetect != nil {
+					d.onDetect(actionName, smbPath)
+				} else {
+					log.Infof("detected: %s %s", actionName, smbPath)
+				}
 				log.Debugf("fsnotify: %s action=%d smbPath=%s", ev.Name, action, smbPath)
 				d.notifyChange(smbPath, action)
 
@@ -1142,6 +1152,11 @@ func (d *Server) notifyChange(filePath string, action uint32) {
 	if idx := strings.LastIndex(filePath, "/"); idx >= 0 {
 		dir = filePath[:idx]
 		base = filePath[idx+1:]
+	}
+
+	// Suppress notifications for macOS metadata files
+	if strings.HasPrefix(base, "._") || base == ".DS_Store" {
+		return
 	}
 	// Convert base name to backslashes for SMB response
 	smbBase := strings.ReplaceAll(base, "/", "\\")
