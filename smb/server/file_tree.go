@@ -83,7 +83,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 	isSymlink := fileExists && (attrs.GetFileType() == vfs.FileTypeSymlink) && (r.CreateOptions()&FILE_OPEN_REPARSE_POINT == 0)
 	d := r.CreateDisposition()
 
-	if fileExists && !isDir && createDir {
+	if fileExists && !isDir && !isSymlink && createDir {
 		status := STATUS_OBJECT_NAME_COLLISION
 		if d != FILE_CREATE {
 			status = STATUS_NOT_A_DIRECTORY

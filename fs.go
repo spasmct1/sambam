@@ -48,6 +48,7 @@ func NewPassthroughFS(rootPath string, readOnly bool) *PassthroughFS {
 
 func (fs *PassthroughFS) GetAttr(handle vfs.VfsHandle) (*vfs.Attributes, error) {
 	p := fs.rootPath
+	followSymlinks := false
 	if handle != 0 {
 		v, ok := fs.openFiles.Load(handle)
 		if !ok {
@@ -55,9 +56,16 @@ func (fs *PassthroughFS) GetAttr(handle vfs.VfsHandle) (*vfs.Attributes, error) 
 		}
 		open := v.(*OpenFile)
 		p = open.path
+		followSymlinks = open.isDir
 	}
 
-	info, err := os.Lstat(p)
+	var info os.FileInfo
+	var err error
+	if followSymlinks {
+		info, err = os.Stat(p)
+	} else {
+		info, err = os.Lstat(p)
+	}
 	if err != nil {
 		return nil, err
 	}
