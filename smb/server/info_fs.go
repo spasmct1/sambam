@@ -495,6 +495,32 @@ func (i *FileFsSectorSizeInformationInfo) Encode(pkt []byte) {
 	le.PutUint32(pkt[24:], i.ByteOffsetForPartitionAlignment)
 }
 
+type FileFsPosixInformationInfo struct {
+	OptimalTransferSize uint32
+	BlockSize           uint32
+	TotalBlocks         uint64
+	BlocksAvail         uint64
+	UserBlocksAvail     uint64
+	TotalFileNodes      uint64
+	FreeFileNodes       uint64
+	FileSysIdentifier   uint64
+}
+
+func (i *FileFsPosixInformationInfo) Size() int {
+	return 56
+}
+
+func (i *FileFsPosixInformationInfo) Encode(pkt []byte) {
+	le.PutUint32(pkt[0:], i.OptimalTransferSize)
+	le.PutUint32(pkt[4:], i.BlockSize)
+	le.PutUint64(pkt[8:], i.TotalBlocks)
+	le.PutUint64(pkt[16:], i.BlocksAvail)
+	le.PutUint64(pkt[24:], i.UserBlocksAvail)
+	le.PutUint64(pkt[32:], i.TotalFileNodes)
+	le.PutUint64(pkt[40:], i.FreeFileNodes)
+	le.PutUint64(pkt[48:], i.FileSysIdentifier)
+}
+
 type FileFsSizeInformationInfo struct {
 	TotalAllocationUnits     int64
 	AvailableAllocationUnits int64

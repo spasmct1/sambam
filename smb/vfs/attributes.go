@@ -69,9 +69,10 @@ type Attributes struct {
 	permissions  Permissions
 	sizeBytes    uint64
 	diskSize     uint64
-	uid          uint32
-	gid          uint32
-	unixMode     uint32
+	uid               uint32
+	gid               uint32
+	unixMode          uint32
+	symlinkTargetDir  bool
 }
 
 // GetChangeID returns the change ID, which clients can use to determine
@@ -136,6 +137,17 @@ func (a *Attributes) GetFileType() FileType {
 func (a *Attributes) SetFileType(fileType FileType) *Attributes {
 	a.fileType = fileType
 	a.fieldsPresent |= AttributesMaskFileType
+	return a
+}
+
+// SymlinkTargetIsDir returns true if this is a symlink whose target is a directory.
+func (a *Attributes) SymlinkTargetIsDir() bool {
+	return a.symlinkTargetDir
+}
+
+// SetSymlinkTargetDir marks this symlink as pointing to a directory.
+func (a *Attributes) SetSymlinkTargetDir(isDir bool) *Attributes {
+	a.symlinkTargetDir = isDir
 	return a
 }
 

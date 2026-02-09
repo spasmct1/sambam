@@ -99,7 +99,10 @@ func (fs *PassthroughFS) SetAttr(handle vfs.VfsHandle, a *vfs.Attributes) (*vfs.
 	}
 
 	if mode, mSet := a.GetUnixMode(); mSet {
-		os.Chmod(open.path, os.FileMode(mode&0777))
+		// Lstat to check if symlink — can't chmod symlinks on Linux
+		if info, err := os.Lstat(open.path); err == nil && info.Mode()&os.ModeSymlink == 0 {
+			os.Chmod(open.path, os.FileMode(mode&0777))
+		}
 	}
 
 	uid, uidSet := a.GetUID()
@@ -113,7 +116,7 @@ func (fs *PassthroughFS) SetAttr(handle vfs.VfsHandle, a *vfs.Attributes) (*vfs.
 		if gidSet {
 			chownGid = int(gid)
 		}
-		os.Chown(open.path, chownUid, chownGid)
+		os.Lchown(open.path, chownUid, chownGid)
 	}
 
 	return nil, nil
@@ -192,7 +195,9 @@ func (fs *PassthroughFS) Close(handle vfs.VfsHandle) error {
 	}
 	open := v.(*OpenFile)
 
-	open.f.Close()
+	if open.f != nil {
+		open.f.Close()
+	}
 	fs.openFiles.Delete(handle)
 
 	return nil
@@ -361,6 +366,12 @@ func (fs *PassthroughFS) ReadDir(handle vfs.VfsHandle, pos int, maxEntries int) 
 		if attrErr != nil {
 			continue
 		}
+		// For symlinks, check if the target is a directory
+		if info.Mode()&os.ModeSymlink != 0 {
+			if target, serr := os.Stat(path.Join(open.path, entry.Name())); serr == nil && target.IsDir() {
+				attrs.SetSymlinkTargetDir(true)
+			}
+		}
 		results = append(results, vfs.DirInfo{Name: entry.Name(), Attributes: *attrs})
 	}
 	open.dirPos = 1
@@ -462,8 +473,37 @@ func (fs *PassthroughFS) Rename(from vfs.VfsHandle, to string, flags int) error 
 	return os.Rename(open.path, path.Join(fs.rootPath, to))
 }
 
-func (fs *PassthroughFS) Symlink(targetHandle vfs.VfsHandle, source string, flag int) (*vfs.Attributes, error) {
-	return nil, fmt.Errorf("symlinks not supported")
+func (fs *PassthroughFS) Symlink(targetHandle vfs.VfsHandle, target string, flag int) (*vfs.Attributes, error) {
+	if fs.readOnly {
+		return nil, fmt.Errorf("read-only share")
+	}
+	if targetHandle == 0 {
+		return nil, fmt.Errorf("bad handle")
+	}
+	v, ok := fs.openFiles.Load(targetHandle)
+	if !ok {
+		return nil, fmt.Errorf("bad handle")
+	}
+	open := v.(*OpenFile)
+	linkPath := open.path
+
+	// Close and remove the placeholder file created by the CREATE request
+	if open.f != nil {
+		open.f.Close()
+		open.f = nil
+	}
+	os.Remove(linkPath)
+
+	// Create the actual symlink
+	if err := os.Symlink(target, linkPath); err != nil {
+		return nil, err
+	}
+
+	info, err := os.Lstat(linkPath)
+	if err != nil {
+		return nil, err
+	}
+	return fileInfoToAttr(info)
 }
 
 func (fs *PassthroughFS) Link(vfs.VfsNode, vfs.VfsNode, string) (*vfs.Attributes, error) {

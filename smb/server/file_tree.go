@@ -183,22 +183,37 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 	access := r.DesiredAccess()
 	var h vfs.VfsHandle
 	if !isDir {
-		if access&(FILE_WRITE_DATA|GENERIC_WRITE) != 0 {
-			flags |= os.O_RDWR
-		} else {
-			flags |= os.O_RDONLY
+		if isSymlink {
+			// Symlink target might be a directory — try OpenDir first (follows symlinks)
+			h, err = t.fs.OpenDir(name)
+			if err == nil {
+				isDir = true
+				log.Debugf("open dir (symlink target), err %v", err)
+			}
 		}
+		if !isDir {
+			if access&(FILE_WRITE_DATA|GENERIC_WRITE) != 0 {
+				flags |= os.O_RDWR
+			} else {
+				flags |= os.O_RDONLY
+			}
 
-		if isEA {
-			flags = 0
+			if isEA {
+				flags = 0
+			}
+
+			if r.CreateOptions()&FILE_OPEN_REPARSE_POINT != 0 && fileExists {
+				flags |= 0x200000 | 0x20000 // O_PATH | O_NOFOLLOW — open symlink itself
+			}
+
+			h, err = t.fs.Open(name, flags, 0644)
+			if err != nil && isSymlink {
+				// Dangling symlink — target doesn't exist, open the symlink itself
+				flags = 0x200000 | 0x20000 // O_PATH | O_NOFOLLOW
+				h, err = t.fs.Open(name, flags, 0644)
+			}
+			log.Debugf("open file: %d, err %v", flags, err)
 		}
-
-		if r.CreateOptions()&FILE_OPEN_REPARSE_POINT != 0 {
-			flags |= 0x200000 // O_SYMLINK, O_PATH
-		}
-
-		h, err = t.fs.Open(name, flags, 0644)
-		log.Debugf("open file: %d, err %v", flags, err)
 	} else {
 		h, err = t.fs.OpenDir(name)
 		log.Debugf("open dir, err %v", err)
@@ -206,6 +221,10 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 
 	if err == nil {
 		attrs, err = t.fs.GetAttr(h)
+		if err == nil && isSymlink && isDir {
+			// Followed symlink to directory — report as directory, not symlink
+			attrs.SetFileType(vfs.FileTypeDirectory)
+		}
 	}
 	if err != nil {
 		log.Errorf("open failed: %s, %v, co %x", name, err, r.CreateOptions())
@@ -1597,9 +1616,22 @@ func (t *fileTree) queryInfoFileSystem(ctx *compoundContext, pkt []byte) error {
 		}
 		le.PutUint64(id.BirthVolumeId.Persistent[:], attrRoot.GetInodeNumber())
 		info = id
+	case FilePosixInformation:
+		info = &FileFsPosixInformationInfo{
+			OptimalTransferSize: bs,
+			BlockSize:           bs,
+			TotalBlocks:         uint64(ta),
+			BlocksAvail:         uint64(au),
+			UserBlocksAvail:     uint64(au),
+			TotalFileNodes:      1000000,
+			FreeFileNodes:       1000000,
+			FileSysIdentifier:   0,
+		}
 	default:
 		log.Errorf("queryInfoFileSystem: unsupported type %d", r.FileInfoClass())
-		return &InvalidRequestError{"unsupported query class"}
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
 	rsp := new(QueryInfoResponse)
@@ -1747,6 +1779,10 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 		info = &FileInternalInformationInfo{
 			int64(a.GetInodeNumber()),
 		}
+	case FileFullEaInformation:
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NO_EAS_ON_FILE))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
 	case FilePosixInformation:
 		if !t.session.conn.posixExtensions {
 			rsp := new(ErrorResponse)
@@ -1783,8 +1819,10 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 			GroupSid:       groupBuf,
 		}
 	default:
-		log.Error("unsupported type")
-		return &InvalidRequestError{"unsupported query class"}
+		log.Errorf("queryInfoFile: unsupported class %d", r.FileInfoClass())
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
 	rsp := new(QueryInfoResponse)

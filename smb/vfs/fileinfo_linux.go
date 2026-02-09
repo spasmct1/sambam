@@ -16,6 +16,7 @@ func CompatStat(stat os.FileInfo) (Stat, bool) {
 		Ino:     sysStat.Ino,
 		Blocks:  sysStat.Blocks,
 		BlkSize: int32(sysStat.Blksize),
+		Mode:    sysStat.Mode,
 		Uid:     sysStat.Uid,
 		Gid:     sysStat.Gid,
 		Nlink:   uint32(sysStat.Nlink),
