@@ -48,7 +48,6 @@ func NewPassthroughFS(rootPath string, readOnly bool) *PassthroughFS {
 
 func (fs *PassthroughFS) GetAttr(handle vfs.VfsHandle) (*vfs.Attributes, error) {
 	p := fs.rootPath
-	followSymlinks := false
 	if handle != 0 {
 		v, ok := fs.openFiles.Load(handle)
 		if !ok {
@@ -56,16 +55,9 @@ func (fs *PassthroughFS) GetAttr(handle vfs.VfsHandle) (*vfs.Attributes, error) 
 		}
 		open := v.(*OpenFile)
 		p = open.path
-		followSymlinks = open.isDir
 	}
 
-	var info os.FileInfo
-	var err error
-	if followSymlinks {
-		info, err = os.Stat(p)
-	} else {
-		info, err = os.Lstat(p)
-	}
+	info, err := os.Lstat(p)
 	if err != nil {
 		return nil, err
 	}
@@ -374,12 +366,6 @@ func (fs *PassthroughFS) ReadDir(handle vfs.VfsHandle, pos int, maxEntries int) 
 		if attrErr != nil {
 			continue
 		}
-		// For symlinks, check if the target is a directory
-		if info.Mode()&os.ModeSymlink != 0 {
-			if target, serr := os.Stat(path.Join(open.path, entry.Name())); serr == nil && target.IsDir() {
-				attrs.SetSymlinkTargetDir(true)
-			}
-		}
 		results = append(results, vfs.DirInfo{Name: entry.Name(), Attributes: *attrs})
 	}
 	open.dirPos = 1
@@ -473,7 +459,7 @@ func (fs *PassthroughFS) Rename(from vfs.VfsHandle, to string, flags int) error 
 	open := v.(*OpenFile)
 
 	if flags == 0 {
-		if _, err := os.Stat(to); err == nil {
+		if _, err := os.Lstat(path.Join(fs.rootPath, to)); err == nil {
 			return fmt.Errorf("already exists")
 		}
 	}

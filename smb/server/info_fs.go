@@ -1106,8 +1106,14 @@ type PosixFileInfo struct {
 	GroupSid       []byte
 }
 
+const posixInfoMinSidBuf = 40
+
 func (i *PosixFileInfo) Size() int {
-	return 80 + len(i.OwnerSid) + len(i.GroupSid)
+	sidLen := len(i.OwnerSid) + len(i.GroupSid)
+	if sidLen < posixInfoMinSidBuf {
+		sidLen = posixInfoMinSidBuf
+	}
+	return 80 + sidLen
 }
 
 func (i *PosixFileInfo) Encode(pkt []byte) {
@@ -1124,6 +1130,10 @@ func (i *PosixFileInfo) Encode(pkt []byte) {
 	le.PutUint32(pkt[68:], i.HardLinks)
 	le.PutUint32(pkt[72:], i.ReparseTag)
 	le.PutUint32(pkt[76:], i.Mode)
+	// Zero SID area then write actual SIDs
+	for j := 80; j < 80+posixInfoMinSidBuf && j < len(pkt); j++ {
+		pkt[j] = 0
+	}
 	copy(pkt[80:], i.OwnerSid)
 	copy(pkt[80+len(i.OwnerSid):], i.GroupSid)
 }

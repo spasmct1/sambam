@@ -83,7 +83,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 	isSymlink := fileExists && (attrs.GetFileType() == vfs.FileTypeSymlink) && (r.CreateOptions()&FILE_OPEN_REPARSE_POINT == 0)
 	d := r.CreateDisposition()
 
-	if fileExists && !isDir && !isSymlink && createDir {
+	if fileExists && !isDir && createDir {
 		status := STATUS_OBJECT_NAME_COLLISION
 		if d != FILE_CREATE {
 			status = STATUS_NOT_A_DIRECTORY
@@ -183,37 +183,25 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 	access := r.DesiredAccess()
 	var h vfs.VfsHandle
 	if !isDir {
+		if access&(FILE_WRITE_DATA|GENERIC_WRITE) != 0 {
+			flags |= os.O_RDWR
+		} else {
+			flags |= os.O_RDONLY
+		}
+
+		if isEA {
+			flags = 0
+		}
+
 		if isSymlink {
-			// Symlink target might be a directory — try OpenDir first (follows symlinks)
-			h, err = t.fs.OpenDir(name)
-			if err == nil {
-				isDir = true
-				log.Debugf("open dir (symlink target), err %v", err)
-			}
+			// Always open symlinks with O_PATH|O_NOFOLLOW — let client resolve
+			flags = 0x200000 | 0x20000 // O_PATH | O_NOFOLLOW
+		} else if r.CreateOptions()&FILE_OPEN_REPARSE_POINT != 0 && fileExists {
+			flags |= 0x200000 | 0x20000 // O_PATH | O_NOFOLLOW — open symlink itself
 		}
-		if !isDir {
-			if access&(FILE_WRITE_DATA|GENERIC_WRITE) != 0 {
-				flags |= os.O_RDWR
-			} else {
-				flags |= os.O_RDONLY
-			}
 
-			if isEA {
-				flags = 0
-			}
-
-			if r.CreateOptions()&FILE_OPEN_REPARSE_POINT != 0 && fileExists {
-				flags |= 0x200000 | 0x20000 // O_PATH | O_NOFOLLOW — open symlink itself
-			}
-
-			h, err = t.fs.Open(name, flags, 0644)
-			if err != nil && isSymlink {
-				// Dangling symlink — target doesn't exist, open the symlink itself
-				flags = 0x200000 | 0x20000 // O_PATH | O_NOFOLLOW
-				h, err = t.fs.Open(name, flags, 0644)
-			}
-			log.Debugf("open file: %d, err %v", flags, err)
-		}
+		h, err = t.fs.Open(name, flags, 0644)
+		log.Debugf("open file: %d, err %v", flags, err)
 	} else {
 		h, err = t.fs.OpenDir(name)
 		log.Debugf("open dir, err %v", err)
@@ -221,10 +209,6 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 
 	if err == nil {
 		attrs, err = t.fs.GetAttr(h)
-		if err == nil && isSymlink && isDir {
-			// Followed symlink to directory — report as directory, not symlink
-			attrs.SetFileType(vfs.FileTypeDirectory)
-		}
 	}
 	if err != nil {
 		log.Errorf("open failed: %s, %v, co %x", name, err, r.CreateOptions())
@@ -474,6 +458,8 @@ func (t *fileTree) handlePosixCC(attrs *vfs.Attributes) (Encoder, error) {
 	if attrs.GetFileType() == vfs.FileTypeSymlink {
 		reparseTag = IO_REPARSE_TAG_SYMLINK
 	}
+
+	log.Debugf("POSIX CC: mode=0x%x, type=%d, nlinks=%d, reparse=0x%x, uid=%d, gid=%d", mode, attrs.GetFileType(), nlinks, reparseTag, uid, gid)
 
 	return &CreateContext{
 		Name: string(SMB2_CREATE_TAG_POSIX),
@@ -1183,7 +1169,7 @@ func newFileNamesInformationInfo(d vfs.DirInfo) FileNamesInformationInfo {
 func newFilePosixDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) *FilePosixDirectoryInformationInfo {
 	uid, _ := d.Attributes.GetUID()
 	gid, _ := d.Attributes.GetGID()
-	mode, _ := d.Attributes.GetUnixMode()
+	mode := uint32(UnixModeFromVfs(&d.Attributes))
 	nlinks := d.Attributes.GetLinkCount()
 
 	ownerSid := PosixSIDFromUid(uid)
@@ -1215,6 +1201,8 @@ func newFilePosixDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) *Fil
 	info.EndOfFile = SizeFromVfs(&d.Attributes)
 	info.AllocationSize = DiskSizeFromVfs(&d.Attributes)
 	info.DosAttributes = PermissionsFromVfs(&d.Attributes, d.Name, hideDotfiles)
+
+	log.Debugf("POSIX direntry: name=%s, mode=0x%x, dosAttrs=0x%x, type=%d, nlinks=%d", d.Name, mode, info.DosAttributes, d.Attributes.GetFileType(), nlinks)
 
 	return info
 }
@@ -1267,7 +1255,7 @@ func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
-	log.Debugf("search patter: %s", r.FileName())
+	log.Debugf("queryDirectory: class=%d, pattern=%s", r.FileInfoClass(), r.FileName())
 	fileId := r.FileId().Decode()
 	if ctx != nil && ctx.fileId != nil {
 		fileId = ctx.fileId
@@ -1792,6 +1780,7 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 		uid, _ := a.GetUID()
 		gid, _ := a.GetGID()
 		mode, _ := a.GetUnixMode()
+		mode &= 0xFFFF // strip Go upper bits, keep permissions only
 		nlinks := a.GetLinkCount()
 		ownerSid := PosixSIDFromUid(uid)
 		groupSid := PosixSIDFromGid(gid)
@@ -1803,6 +1792,8 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 		if a.GetFileType() == vfs.FileTypeSymlink {
 			reparseTag = IO_REPARSE_TAG_SYMLINK
 		}
+		dosAttrs := PermissionsFromVfs(a, open.pathName, t.conn.serverCtx.hideDotfiles)
+		log.Debugf("POSIX info: mode=0x%x, type=%d, dosAttrs=0x%x, inode=%d", mode, a.GetFileType(), dosAttrs, a.GetInodeNumber())
 		info = &PosixFileInfo{
 			CreationTime:   *BirthTimeFromVfs(a),
 			LastAccessTime: *AccessTimeFromVfs(a),
@@ -1810,7 +1801,7 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 			ChangeTime:     *ChangeTimeFromVfs(a),
 			EndOfFile:      int64(SizeFromVfs(a)),
 			AllocationSize: int64(DiskSizeFromVfs(a)),
-			DosAttributes:  PermissionsFromVfs(a, open.pathName, t.conn.serverCtx.hideDotfiles),
+			DosAttributes:  dosAttrs,
 			Inode:          a.GetInodeNumber(),
 			HardLinks:      nlinks,
 			ReparseTag:     reparseTag,

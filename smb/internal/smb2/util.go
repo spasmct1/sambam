@@ -160,9 +160,6 @@ func PermissionsFromVfs(a *vfs.Attributes, path string, hideDotfiles bool) uint3
 	}
 	if a.GetFileType() == vfs.FileTypeSymlink {
 		perm |= FILE_ATTRIBUTE_REPARSE_POINT
-		if a.SymlinkTargetIsDir() {
-			perm |= FILE_ATTRIBUTE_DIRECTORY
-		}
 	}
 
 	if perm == 0 {
