@@ -140,6 +140,40 @@ func DiskSizeFromVfs(a *vfs.Attributes) uint64 {
 	return SizeFromVfs(a)
 }
 
+const (
+	posixFiletypeShift = 12
+	posixFiletypeMask  = 0x7000 // 0070000
+	posixFiletypeReg   = 0
+	posixFiletypeDir   = 1
+	posixFiletypeLnk   = 2
+	posixFiletypeChr   = 3
+	posixFiletypeBlk   = 4
+	posixFiletypeFifo  = 5
+	posixFiletypeSock  = 6
+)
+
+// PosixWireModeFromVfs returns the SMB3 POSIX wire-format mode.
+// The wire format encodes file type as a small enum in bits 12-14,
+// not the standard S_IF* values.
+func PosixWireModeFromVfs(a *vfs.Attributes) uint32 {
+	perm := uint32(0777)
+	if m, ok := a.GetUnixMode(); ok {
+		perm = m & 07777
+	}
+
+	ftype := uint32(posixFiletypeReg)
+	switch a.GetFileType() {
+	case vfs.FileTypeDirectory:
+		ftype = posixFiletypeDir
+	case vfs.FileTypeSymlink:
+		ftype = posixFiletypeLnk
+	case vfs.FileTypeRegularFile:
+		ftype = posixFiletypeReg
+	}
+
+	return perm | (ftype << posixFiletypeShift)
+}
+
 func PermissionsFromVfs(a *vfs.Attributes, path string, hideDotfiles bool) uint32 {
 	perm := uint32(0)
 	if hideDotfiles {

@@ -12,6 +12,7 @@ import (
 
 	. "github.com/sambam/sambam/smb/internal/erref"
 	. "github.com/sambam/sambam/smb/internal/smb2"
+	"github.com/sambam/sambam/smb/internal/utf16le"
 	"github.com/sambam/sambam/smb/vfs"
 	log "github.com/sirupsen/logrus"
 )
@@ -443,7 +444,7 @@ func (t *fileTree) handleAAPLCC(pkt []byte) (Encoder, error) {
 func (t *fileTree) handlePosixCC(attrs *vfs.Attributes) (Encoder, error) {
 	uid, _ := attrs.GetUID()
 	gid, _ := attrs.GetGID()
-	mode, _ := attrs.GetUnixMode()
+	mode := PosixWireModeFromVfs(attrs)
 	nlinks := attrs.GetLinkCount()
 
 	ownerSid := PosixSIDFromUid(uid)
@@ -1169,7 +1170,7 @@ func newFileNamesInformationInfo(d vfs.DirInfo) FileNamesInformationInfo {
 func newFilePosixDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) *FilePosixDirectoryInformationInfo {
 	uid, _ := d.Attributes.GetUID()
 	gid, _ := d.Attributes.GetGID()
-	mode := uint32(UnixModeFromVfs(&d.Attributes))
+	mode := PosixWireModeFromVfs(&d.Attributes)
 	nlinks := d.Attributes.GetLinkCount()
 
 	ownerSid := PosixSIDFromUid(uid)
@@ -1202,7 +1203,9 @@ func newFilePosixDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) *Fil
 	info.AllocationSize = DiskSizeFromVfs(&d.Attributes)
 	info.DosAttributes = PermissionsFromVfs(&d.Attributes, d.Name, hideDotfiles)
 
-	log.Debugf("POSIX direntry: name=%s, mode=0x%x, dosAttrs=0x%x, type=%d, nlinks=%d", d.Name, mode, info.DosAttributes, d.Attributes.GetFileType(), nlinks)
+	nameLen := utf16le.EncodedStringLen(info.FileName)
+	log.Debugf("POSIX direntry: name=%s, nameLen=%d, ownerSid=%d, groupSid=%d, size=%d, mode=0x%x, dosAttrs=0x%x, type=%d, nlinks=%d",
+		d.Name, nameLen, len(info.OwnerSid), len(info.GroupSid), info.Size(), mode, info.DosAttributes, d.Attributes.GetFileType(), nlinks)
 
 	return info
 }
@@ -1332,6 +1335,16 @@ func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
 				// Put back unconsumed entries so the next QueryDirectory gets them
 				if len(unconsumed) > 0 {
 					t.fs.PutBackDirEntries(vfs.VfsHandle(fileId.HandleId()), unconsumed)
+				}
+
+				if r.FileInfoClass() == FilePosixInformation && len(out.Items) > 0 {
+					total := 0
+					for i, it := range out.Items {
+						sz := it.Size()
+						total += sz
+						log.Debugf("POSIX readdir entry[%d]: size=%d", i, sz)
+					}
+					log.Debugf("POSIX readdir: entries=%d totalBytes=%d maxOut=%d", len(out.Items), total, maxOutBytes)
 				}
 			} else {
 				if err == io.EOF {
@@ -1779,8 +1792,7 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 		}
 		uid, _ := a.GetUID()
 		gid, _ := a.GetGID()
-		mode, _ := a.GetUnixMode()
-		mode &= 0xFFFF // strip Go upper bits, keep permissions only
+		mode := PosixWireModeFromVfs(a)
 		nlinks := a.GetLinkCount()
 		ownerSid := PosixSIDFromUid(uid)
 		groupSid := PosixSIDFromGid(gid)
