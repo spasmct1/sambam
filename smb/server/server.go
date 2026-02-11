@@ -61,9 +61,10 @@ type Server struct {
 
 	acceptSingleConn bool
 
-	onConnect func(remoteAddr string)
-	onRename  func(from, to string)
-	onDetect  func(action, path string)
+	onConnect  func(remoteAddr string)
+	onRename   func(from, to string)
+	onDetect   func(action, path string)
+	onAuthFail func(remoteAddr, username string)
 
 	fsWatcher   *fsnotify.Watcher
 	fsWatchRefs map[string]int
@@ -165,10 +166,11 @@ type ServerConfig struct {
 	Xatrrs           bool
 	IgnoreSetAttrErr bool
 	AcceptSingleConn bool
-	HideDotfiles     bool                         // Hide files starting with '.'
-	OnConnect        func(remoteAddr string)       // Called when a client connects
-	OnRename         func(from, to string)         // Called on file rename
-	OnDetect         func(action, path string)     // Called on fsnotify event
+	HideDotfiles     bool                              // Hide files starting with '.'
+	OnConnect        func(remoteAddr string)           // Called when a client connects
+	OnRename         func(from, to string)             // Called on file rename
+	OnDetect         func(action, path string)         // Called on fsnotify event
+	OnAuthFail       func(remoteAddr, username string) // Called on auth failure
 }
 
 func NewServer(cfg *ServerConfig, a Authenticator, shares map[string]vfs.VFSFileSystem) *Server {
@@ -193,6 +195,7 @@ func NewServer(cfg *ServerConfig, a Authenticator, shares map[string]vfs.VFSFile
 		onConnect:        cfg.OnConnect,
 		onRename:         cfg.OnRename,
 		onDetect:         cfg.OnDetect,
+		onAuthFail:       cfg.OnAuthFail,
 		fsWatchRefs:      map[string]int{},
 		fsWatchRoot:      map[string]string{},
 	}
@@ -252,6 +255,7 @@ func (d *Server) Serve(addr string) error {
 
 		conn := &conn{
 			t:                   direct(c),
+			remoteAddr:          c.RemoteAddr().String(),
 			outstandingRequests: newOutstandingRequests(),
 			account:             a,
 			rdone:               make(chan struct{}, 1),
@@ -314,7 +318,7 @@ func (c *conn) Run() error {
 
 		p := PacketCodec(pkt)
 		if p.Flags()&SMB2_FLAGS_ASYNC_COMMAND != 0 {
-			log.Debugf("Async command received")
+			log.Tracef("Async command received")
 		}
 
 		switch p.Command() {
@@ -383,7 +387,7 @@ func (c *conn) Run() error {
 }
 
 func (c *conn) echo(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("Echo")
+	log.Tracef("Echo")
 
 	p := PacketCodec(pkt)
 	rsp := new(EchoResponse)
@@ -396,7 +400,7 @@ func (c *conn) echo(ctx *compoundContext, pkt []byte) error {
 }
 
 func (c *conn) negotiate(pkt []byte) error {
-	log.Debugf("Negotiate")
+	log.Debugf("negotiate")
 
 	if c.serverState != STATE_NEGOTIATE {
 		if c.useSession() {
@@ -410,7 +414,7 @@ func (c *conn) negotiate(pkt []byte) error {
 }
 
 func (c *conn) sessionSetup(pkt []byte) error {
-	log.Debugf("SessionSetup")
+	log.Debugf("session setup")
 
 	if c.useSession() {
 		c.session = nil
@@ -427,12 +431,12 @@ func (c *conn) sessionSetup(pkt []byte) error {
 		break
 	}
 
-	log.Debugf("Wrong connection state %d", c.serverState)
+	log.Warnf("wrong connection state: %d", c.serverState)
 	return &InvalidRequestError{"wrong connction state"}
 }
 
 func (c *conn) logoff(pkt []byte) error {
-	log.Debugf("Logoff")
+	log.Debugf("logoff")
 
 	p := PacketCodec(pkt)
 	rsp := new(LogoffResponse)
@@ -445,7 +449,7 @@ func (c *conn) logoff(pkt []byte) error {
 }
 
 func (c *conn) treeConnect(pkt []byte) error {
-	log.Debugf("TreeConnect")
+	log.Debugf("tree connect")
 
 	p := PacketCodec(pkt)
 
@@ -459,7 +463,7 @@ func (c *conn) treeConnect(pkt []byte) error {
 		return &InvalidResponseError{"broken tree connect format"}
 	}
 
-	log.Debugf("TreeConnect: %s", r.Path())
+	log.Debugf("tree connect path: %s", r.Path())
 
 	rsp := new(TreeConnectResponse)
 	rsp.CreditRequestResponse = p.CreditRequest()
@@ -494,7 +498,7 @@ func (c *conn) treeConnect(pkt []byte) error {
 			tc = &ft.treeConn
 			c.treeMapByName["\\IPC$"] = ft
 			c.treeMapById[tc.treeId] = ft
-			log.Debugf("new ipc tree %d", tc.treeId)
+			log.Tracef("new ipc tree %d", tc.treeId)
 		}
 
 		err = c.sendPacket(rsp, tc, nil)
@@ -509,7 +513,7 @@ func (c *conn) treeConnect(pkt []byte) error {
 		fs, ok := c.serverCtx.shares[strings.ToUpper(path)]
 		if !ok {
 			if fs, ok = c.serverCtx.shares[strings.ToUpper(path)+"$"]; !ok {
-				log.Debugf("shares: %v", maps.Keys(c.serverCtx.shares))
+				log.Tracef("shares: %v", maps.Keys(c.serverCtx.shares))
 				rsp.Status = uint32(STATUS_BAD_NETWORK_NAME)
 				return c.sendPacket(rsp, nil, nil)
 			}
@@ -559,7 +563,7 @@ func (c *conn) treeConnect(pkt []byte) error {
 }
 
 func (c *conn) treeDisconnect(pkt []byte) error {
-	log.Debugf("TreeDisconnect")
+	log.Debugf("tree disconnect")
 
 	p := PacketCodec(pkt)
 
@@ -636,6 +640,7 @@ func (n *ServerNegotiator) negotiate(conn *conn, pkt []byte) error {
 
 	n.Spnego = newSpnegoServer([]Authenticator{conn.serverCtx.authenticator})
 	outputToken, _ := n.Spnego.initSecContext()
+	log.Infof("negotiated dialect=%s signing=%t", dialectName(conn.dialect), conn.requireSigning)
 
 	if conn.dialect != SMB311 {
 		rsp, _ := n.makeResponse(conn)
@@ -795,6 +800,35 @@ func randint64() uint64 {
 	return uint64(binary.LittleEndian.Uint64(b[:]))
 }
 
+func dialectName(d uint16) string {
+	switch d {
+	case SMB202:
+		return "SMB2.0.2"
+	case SMB210:
+		return "SMB2.1"
+	case SMB300:
+		return "SMB3.0"
+	case SMB302:
+		return "SMB3.0.2"
+	case SMB311:
+		return "SMB3.1.1"
+	default:
+		return fmt.Sprintf("0x%04x", d)
+	}
+}
+
+func authFailedUserFromError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	const p = "no such user "
+	if strings.HasPrefix(msg, p) {
+		return strings.TrimSpace(strings.TrimPrefix(msg, p))
+	}
+	return ""
+}
+
 func (c *conn) calcPreauthHash(pkt []byte) {
 	switch c.dialect {
 	case SMB311:
@@ -809,13 +843,13 @@ func (c *conn) calcPreauthHash(pkt []byte) {
 }
 
 func (c *conn) sessionServerSetup(pkt []byte) error {
-	log.Debugf("sessionServerSetup")
+	log.Debugf("session setup step 1")
 
 	p := PacketCodec(pkt)
 
 	res, err := accept(SMB2_SESSION_SETUP, pkt)
 	if err != nil {
-		log.Debugf("sessionServerSetup: %v", err)
+		log.Debugf("session setup decode failed: %v", err)
 		return err
 	}
 
@@ -823,7 +857,7 @@ func (c *conn) sessionServerSetup(pkt []byte) error {
 
 	r := SessionSetupRequestDecoder(res)
 	if r.IsInvalid() {
-		log.Debugf("sessionServerSetup invalid")
+		log.Debugf("session setup invalid request")
 		return &InvalidRequestError{"broken session setup request format"}
 	}
 
@@ -833,7 +867,7 @@ func (c *conn) sessionServerSetup(pkt []byte) error {
 
 	outputToken, err := c.serverCtx.negotiator.Spnego.challenge(r.SecurityBuffer())
 	if err != nil {
-		log.Debugf("sessionServerSetup challenge: %v", err)
+		log.Warnf("session setup challenge failed: %v", err)
 		return &InvalidRequestError{err.Error()}
 	}
 
@@ -857,7 +891,7 @@ func (c *conn) sessionServerSetup(pkt []byte) error {
 }
 
 func (c *conn) sessionServerSetupChallenge(pkt []byte) error {
-	log.Debugf("sessionServerSetupChallenge")
+	log.Debugf("session setup step 2")
 
 	p := PacketCodec(pkt)
 
@@ -875,6 +909,10 @@ func (c *conn) sessionServerSetupChallenge(pkt []byte) error {
 
 	outputToken, user, err := c.serverCtx.negotiator.Spnego.authenticate(r.SecurityBuffer())
 	if err != nil {
+		if c.serverCtx.onAuthFail != nil {
+			c.serverCtx.onAuthFail(c.remoteAddr, authFailedUserFromError(err))
+		}
+		log.Warnf("authentication failed: %v", err)
 		rsp := new(ErrorResponse)
 		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
 		c.sendPacket(rsp, nil, nil)
@@ -1130,7 +1168,7 @@ func (d *Server) startFsWatcher() {
 				} else {
 					log.Infof("detected: %s %s", actionName, smbPath)
 				}
-				log.Debugf("fsnotify: %s action=%d smbPath=%s", ev.Name, action, smbPath)
+				log.Tracef("fsnotify: %s action=%d smbPath=%s", ev.Name, action, smbPath)
 				d.notifyChange(smbPath, action)
 
 			case _, ok := <-d.fsWatcher.Errors:
@@ -1180,4 +1218,3 @@ func (d *Server) notifyChange(filePath string, action uint32) {
 		}
 	}
 }
-

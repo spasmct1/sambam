@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,6 +22,26 @@ const (
 	O_SHLOCK = 0x10
 	O_EXLOCK = 0x20
 )
+
+var (
+	dirQueryLogMu       sync.Mutex
+	dirQueryLast        = map[string]time.Time{}
+	dirQueryDedupWindow = 300 * time.Millisecond
+)
+
+func shouldLogDirQueryDebug(key string) bool {
+	now := time.Now()
+
+	dirQueryLogMu.Lock()
+	defer dirQueryLogMu.Unlock()
+
+	last, ok := dirQueryLast[key]
+	if ok && now.Sub(last) < dirQueryDedupWindow {
+		return false
+	}
+	dirQueryLast[key] = now
+	return true
+}
 
 type fileTree struct {
 	treeConn
@@ -38,7 +59,7 @@ func (t *fileTree) getTree() *treeConn {
 }
 
 func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("fileTreeCreate")
+	log.Tracef("fileTreeCreate")
 
 	c := t.session.conn
 
@@ -52,7 +73,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		return &InvalidRequestError{"broken create format"}
 	}
 
-	log.Debugf("create name: %s, options %d, disp %d", r.Name(), r.CreateOptions(), r.CreateDisposition())
+	log.Tracef("create name: %s, options %d, disp %d", r.Name(), r.CreateOptions(), r.CreateDisposition())
 
 	rsp := new(CreateResponse)
 	rsp.FileId = &FileId{}
@@ -96,7 +117,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 	}
 
 	if isEA && !fileExists {
-		log.Debugf("attempt to read ea from non-exsiting file: %s", name)
+		log.Tracef("attempt to read ea from non-exsiting file: %s", name)
 		rsp := new(ErrorResponse)
 		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NO_SUCH_FILE))
 		return c.sendPacket(rsp, &t.treeConn, ctx)
@@ -116,14 +137,14 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		}
 	case FILE_OPEN:
 		if !fileExists {
-			log.Debugf("Open: doesn't exist: %s", r.Name())
+			log.Tracef("Open: doesn't exist: %s", r.Name())
 			rsp := new(ErrorResponse)
 			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NO_SUCH_FILE))
 			return c.sendPacket(rsp, &t.treeConn, ctx)
 		}
 	case FILE_CREATE:
 		if fileExists {
-			log.Debugf("Open: already exists: %s", r.Name())
+			log.Tracef("Open: already exists: %s", r.Name())
 			rsp := new(ErrorResponse)
 			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_OBJECT_NAME_COLLISION))
 			return c.sendPacket(rsp, &t.treeConn, ctx)
@@ -202,10 +223,10 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		}
 
 		h, err = t.fs.Open(name, flags, 0644)
-		log.Debugf("open file: %d, err %v", flags, err)
+		log.Tracef("open file: %d, err %v", flags, err)
 	} else {
 		h, err = t.fs.OpenDir(name)
-		log.Debugf("open dir, err %v", err)
+		log.Tracef("open dir, err %v", err)
 	}
 
 	if err == nil {
@@ -220,7 +241,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 
 	if isEA {
 		if status, err := t.handleCreateEA(d, h, eaKey); err != nil {
-			log.Debugf("handleCreateEA failed, disp %d, key %s", d, eaKey)
+			log.Tracef("handleCreateEA failed, disp %d, key %s", d, eaKey)
 			t.fs.Close(h)
 			rsp := new(ErrorResponse)
 			PrepareResponse(&rsp.PacketHeader, pkt, status)
@@ -270,7 +291,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 	for len(cc) > 0 {
 		res := CreateContextDecoder(cc)
 		ccName := res.Name()
-		log.Debugf("create context: name=%q len=%d", ccName, len(ccName))
+		log.Tracef("create context: name=%q len=%d", ccName, len(ccName))
 		switch ccName {
 		case "MxAc":
 			if enc, err := t.handleMaxAccessCC(attrs); err == nil {
@@ -296,7 +317,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		default:
 			// Check for POSIX create context (16-byte GUID tag)
 			if t.session.conn.posixExtensions && len(ccName) == 16 && ccName == string(SMB2_CREATE_TAG_POSIX) {
-				log.Debugf("POSIX create context matched")
+				log.Tracef("POSIX create context matched")
 				if enc, err := t.handlePosixCC(attrs); err == nil {
 					rsp.Contexts = append(rsp.Contexts, enc)
 				}
@@ -460,7 +481,7 @@ func (t *fileTree) handlePosixCC(attrs *vfs.Attributes) (Encoder, error) {
 		reparseTag = IO_REPARSE_TAG_SYMLINK
 	}
 
-	log.Debugf("POSIX CC: mode=0x%x, type=%d, nlinks=%d, reparse=0x%x, uid=%d, gid=%d", mode, attrs.GetFileType(), nlinks, reparseTag, uid, gid)
+	log.Tracef("POSIX CC: mode=0x%x, type=%d, nlinks=%d, reparse=0x%x, uid=%d, gid=%d", mode, attrs.GetFileType(), nlinks, reparseTag, uid, gid)
 
 	return &CreateContext{
 		Name: string(SMB2_CREATE_TAG_POSIX),
@@ -567,7 +588,7 @@ send:
 }
 
 func (t *fileTree) flush(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("flush")
+	log.Tracef("flush")
 
 	c := t.session.conn
 
@@ -631,7 +652,7 @@ func (t *fileTree) readEA(ctx *compoundContext, fileId *FileId, open *Open, buf 
 }
 
 func (t *fileTree) read(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("read")
+	log.Tracef("read")
 	c := t.session.conn
 
 	res, _ := accept(SMB2_READ, pkt)
@@ -712,12 +733,12 @@ func (t *fileTree) readImpl(ctx *compoundContext, pkt []byte, fileId *FileId, op
 	rsp.DataRemaining = 0
 	rsp.Data = buf[:n]
 
-	log.Debugf("read async %d finished", asyncId)
+	log.Tracef("read async %d finished", asyncId)
 	return c.sendPacket(rsp, &t.treeConn, ctx)
 }
 
 func (t *fileTree) write(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("write")
+	log.Tracef("write")
 
 	c := t.session.conn
 
@@ -774,12 +795,12 @@ func (t *fileTree) writeImpl(ctx *compoundContext, pkt []byte, fileId *FileId, o
 	r := WriteRequestDecoder(res)
 
 	if open.isEa {
-		log.Debugf("write ea: key %s, val %s", open.eaKey, r.Data())
+		log.Tracef("write ea: key %s, val %s", open.eaKey, r.Data())
 		// ignore xattr errors
 		t.fs.Setxattr(vfs.VfsHandle(fileId.HandleId()), open.eaKey, r.Data())
 		n = len(r.Data())
 	} else {
-		log.Debugf("Write: %d offset %d", r.Length(), r.Offset())
+		log.Tracef("Write: %d offset %d", r.Length(), r.Offset())
 		n, err = t.fs.Write(vfs.VfsHandle(fileId.HandleId()), r.Data(), r.Offset(), int(r.Flags()))
 	}
 
@@ -799,7 +820,7 @@ func (t *fileTree) writeImpl(ctx *compoundContext, pkt []byte, fileId *FileId, o
 }
 
 func (t *fileTree) lock(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("Lock")
+	log.Tracef("Lock")
 	c := t.session.conn
 
 	//rsp := new(ErrorResponse)
@@ -835,7 +856,7 @@ func (t *fileTree) handleReparsePointReq(ctx *compoundContext, pkt []byte) error
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
-	log.Debugf("handleReparsePointReq: subst name %s", rd.SubstituteName())
+	log.Tracef("handleReparsePointReq: subst name %s", rd.SubstituteName())
 	source := strings.ReplaceAll(rd.SubstituteName(), "\\", "/")
 	_, err := t.fs.Symlink(vfs.VfsHandle(fileId.HandleId()), source, int(rd.Flags()))
 	if err != nil {
@@ -962,7 +983,7 @@ func (t *fileTree) handleCreateOrGetObjectId(ctx *compoundContext, pkt []byte) e
 }
 
 func (t *fileTree) ioctl(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("Ioctl")
+	log.Tracef("Ioctl")
 
 	c := t.session.conn
 
@@ -980,7 +1001,7 @@ func (t *fileTree) ioctl(ctx *compoundContext, pkt []byte) error {
 		return t.handleCreateOrGetObjectId(ctx, pkt)
 	}
 
-	log.Debugf("ioctl: unsupported code %d", r.CtlCode())
+	log.Tracef("ioctl: unsupported code %d", r.CtlCode())
 	/*rsp := new(IoctlResponse)
 	rsp.CtlCode = r.CtlCode()
 	rsp.FileId = r.FileId().Decode()
@@ -992,7 +1013,7 @@ func (t *fileTree) ioctl(ctx *compoundContext, pkt []byte) error {
 }
 
 func (t *fileTree) cancel(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("Cancel request received")
+	log.Tracef("Cancel request received")
 
 	p := PacketCodec(pkt)
 	asyncId := p.AsyncId()
@@ -1186,13 +1207,13 @@ func newFilePosixDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) *Fil
 	}
 
 	info := &FilePosixDirectoryInformationInfo{
-		FileName:  d.Name,
-		Inode:     d.GetInodeNumber(),
-		Mode:      mode,
-		HardLinks: nlinks,
+		FileName:   d.Name,
+		Inode:      d.GetInodeNumber(),
+		Mode:       mode,
+		HardLinks:  nlinks,
 		ReparseTag: reparseTag,
-		OwnerSid:  ownerBuf,
-		GroupSid:  groupBuf,
+		OwnerSid:   ownerBuf,
+		GroupSid:   groupBuf,
 	}
 
 	info.CreationTime = *BirthTimeFromVfs(&d.Attributes)
@@ -1204,7 +1225,7 @@ func newFilePosixDirectoryInformationInfo(d vfs.DirInfo, hideDotfiles bool) *Fil
 	info.DosAttributes = PermissionsFromVfs(&d.Attributes, d.Name, hideDotfiles)
 
 	nameLen := utf16le.EncodedStringLen(info.FileName)
-	log.Debugf("POSIX direntry: name=%s, nameLen=%d, ownerSid=%d, groupSid=%d, size=%d, mode=0x%x, dosAttrs=0x%x, type=%d, nlinks=%d",
+	log.Tracef("POSIX direntry: name=%s, nameLen=%d, ownerSid=%d, groupSid=%d, size=%d, mode=0x%x, dosAttrs=0x%x, type=%d, nlinks=%d",
 		d.Name, nameLen, len(info.OwnerSid), len(info.GroupSid), info.Size(), mode, info.DosAttributes, d.Attributes.GetFileType(), nlinks)
 
 	return info
@@ -1239,7 +1260,7 @@ func (t *fileTree) makeItem(class uint8, d vfs.DirInfo) Encoder {
 }
 
 func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("QueryDirectory")
+	log.Tracef("QueryDirectory")
 
 	c := t.session.conn
 
@@ -1258,7 +1279,7 @@ func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
-	log.Debugf("queryDirectory: class=%d, pattern=%s", r.FileInfoClass(), r.FileName())
+	log.Tracef("queryDirectory: class=%d, pattern=%s", r.FileInfoClass(), r.FileName())
 	fileId := r.FileId().Decode()
 	if ctx != nil && ctx.fileId != nil {
 		fileId = ctx.fileId
@@ -1269,6 +1290,11 @@ func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
 		rsp := new(ErrorResponse)
 		PrepareResponse(rsp.Header(), pkt, uint32(STATUS_INVALID_HANDLE))
 		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
+
+	dirTarget := fmt.Sprintf("handle=%d", fileId.HandleId())
+	if open := t.conn.serverCtx.getOpen(fileId.HandleId()); open != nil && open.pathName != "" {
+		dirTarget = open.pathName
 	}
 
 	out := &FileInformationInfoResponse{}
@@ -1293,7 +1319,7 @@ func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
 
 		if !ContainsWildcard(name) {
 			if attrs, err := t.fs.Lookup(vfs.VfsHandle(fileId.HandleId()), name); err == nil {
-				log.Debugf("lookup %s success", name)
+				log.Tracef("lookup %s success", name)
 				d := vfs.DirInfo{Name: name, Attributes: *attrs}
 				info := t.makeItem(r.FileInfoClass(), d)
 				out.Items = append(out.Items, info)
@@ -1342,9 +1368,9 @@ func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
 					for i, it := range out.Items {
 						sz := it.Size()
 						total += sz
-						log.Debugf("POSIX readdir entry[%d]: size=%d", i, sz)
+						log.Tracef("POSIX readdir entry[%d]: size=%d", i, sz)
 					}
-					log.Debugf("POSIX readdir: entries=%d totalBytes=%d maxOut=%d", len(out.Items), total, maxOutBytes)
+					log.Tracef("POSIX readdir: entries=%d totalBytes=%d maxOut=%d", len(out.Items), total, maxOutBytes)
 				}
 			} else {
 				if err == io.EOF {
@@ -1368,11 +1394,24 @@ func (t *fileTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
 		PrepareResponse(rsp.Header(), pkt, Status)
 	}
 
+	// Many clients (including POSIX mounts) issue a trailing QUERY_DIRECTORY that
+	// only asks "are there more entries?". Skip that terminal call in debug logs.
+	if Status != uint32(STATUS_NO_MORE_FILES) {
+		event := "dir list"
+		if r.Flags()&RESTART_SCANS != 0 {
+			event = "dir refresh"
+		}
+		key := fmt.Sprintf("%s|%s", event, dirTarget)
+		if shouldLogDirQueryDebug(key) {
+			log.Debugf("%s: %s", event, dirTarget)
+		}
+	}
+
 	return c.sendPacket(rsp, &t.treeConn, ctx)
 }
 
 func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("ChangeNotify")
+	log.Tracef("ChangeNotify")
 
 	c := t.session.conn
 
@@ -1384,7 +1423,7 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 		fileId = ctx.fileId
 	}
 	if IsInvalidFileId(fileId) {
-		log.Debugf("ChangeNotify: invalid fileid")
+		log.Tracef("ChangeNotify: invalid fileid")
 		rsp := new(ErrorResponse)
 		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
 		return c.sendPacket(rsp, &t.treeConn, ctx)
@@ -1398,7 +1437,7 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
-	log.Debugf("ChangeNotify: file %s, h: %d", open.pathName, fileId.HandleId())
+	log.Tracef("ChangeNotify: file %s, h: %d", open.pathName, fileId.HandleId())
 
 	/*ch := make(chan *vfs.NotifyEvent)
 	t.fs.RegisterNotify(vfs.VfsHandle(fileId.HandleId()), ch)
@@ -1487,12 +1526,12 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 				}
 				quiet.Stop()
 			case <-cancelCh:
-				log.Debugf("ChangeNotify: cancelled h=%d", h)
+				log.Tracef("ChangeNotify: cancelled h=%d", h)
 			case <-time.After(60 * time.Second):
 				// Liveness check: if the open handle is gone (connection dropped),
 				// exit the goroutine to prevent leaks.
 				if t.conn.serverCtx.getOpen(h) == nil {
-					log.Debugf("ChangeNotify: open gone h=%d", h)
+					log.Tracef("ChangeNotify: open gone h=%d", h)
 					return
 				}
 				continue // keep waiting
@@ -1507,7 +1546,7 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 		// Keep notifyCh alive to buffer events between ChangeNotify cycles
 
 		if len(events) > 0 {
-			log.Debugf("notify: %d change(s) h=%d", len(events), h)
+			log.Tracef("notify: %d change(s) h=%d", len(events), h)
 			rsp := new(ChangeNotifyResponse)
 			list := make(FileNotifyInformationList, len(events))
 			for i, ev := range events {
@@ -1520,7 +1559,7 @@ func (t *fileTree) changeNotify(ctx *compoundContext, pkt []byte) error {
 			PrepareAsyncResponse(&rsp.PacketHeader, reqPkt, asyncId, 0)
 			c.sendPacket(rsp, &t.treeConn, ctx)
 		} else {
-			log.Debugf("ChangeNotify: sending STATUS_CANCELLED h=%d", h)
+			log.Tracef("ChangeNotify: sending STATUS_CANCELLED h=%d", h)
 			final := new(ErrorResponse)
 			PrepareAsyncResponse(&final.PacketHeader, reqPkt, asyncId, uint32(STATUS_CANCELLED))
 			c.sendPacket(final, &t.treeConn, ctx)
@@ -1536,7 +1575,7 @@ func (t *fileTree) queryInfoFileSystem(ctx *compoundContext, pkt []byte) error {
 	res, _ := accept(SMB2_QUERY_INFO, pkt)
 	r := QueryInfoRequestDecoder(res)
 
-	log.Debugf("queryInfoFileSystem: class %d", r.FileInfoClass())
+	log.Tracef("queryInfoFileSystem: class %d", r.FileInfoClass())
 
 	s, _ := t.fs.StatFS(0)
 	bs := uint32(512)
@@ -1648,7 +1687,7 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 	res, _ := accept(SMB2_QUERY_INFO, pkt)
 	r := QueryInfoRequestDecoder(res)
 
-	log.Debugf("queryInfoFile: class %d", r.FileInfoClass())
+	log.Tracef("queryInfoFile: class %d", r.FileInfoClass())
 
 	fileId := r.FileId().Decode()
 	if ctx != nil && ctx.fileId != nil {
@@ -1734,7 +1773,7 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 			},
 		}
 
-		log.Debugf("queryInfoFile: xattrs ret %v, err %v", xattrs, err)
+		log.Tracef("queryInfoFile: xattrs ret %v, err %v", xattrs, err)
 		if err == nil && t.conn.serverCtx.xattrs {
 			for _, ea := range xattrs {
 				l, err := t.fs.Getxattr(vfs.VfsHandle(fileId.HandleId()), ea, nil)
@@ -1805,7 +1844,7 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 			reparseTag = IO_REPARSE_TAG_SYMLINK
 		}
 		dosAttrs := PermissionsFromVfs(a, open.pathName, t.conn.serverCtx.hideDotfiles)
-		log.Debugf("POSIX info: mode=0x%x, type=%d, dosAttrs=0x%x, inode=%d", mode, a.GetFileType(), dosAttrs, a.GetInodeNumber())
+		log.Tracef("POSIX info: mode=0x%x, type=%d, dosAttrs=0x%x, inode=%d", mode, a.GetFileType(), dosAttrs, a.GetInodeNumber())
 		info = &PosixFileInfo{
 			CreationTime:   *BirthTimeFromVfs(a),
 			LastAccessTime: *AccessTimeFromVfs(a),
@@ -1920,7 +1959,7 @@ func (t *fileTree) queryInfoSec(ctx *compoundContext, pkt []byte) error {
 }
 
 func (t *fileTree) queryInfo(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("QueryInfo")
+	log.Tracef("QueryInfo")
 
 	c := t.session.conn
 
@@ -1934,7 +1973,7 @@ func (t *fileTree) queryInfo(ctx *compoundContext, pkt []byte) error {
 		return &InvalidRequestError{"broken quety info format"}
 	}
 
-	log.Debugf("query info type: %d", r.InfoType())
+	log.Tracef("query info type: %d", r.InfoType())
 	switch r.InfoType() {
 	case SMB2_0_INFO_FILE:
 		return t.queryInfoFile(ctx, pkt)
@@ -2037,7 +2076,7 @@ func (t *fileTree) setDispositionInfo(ctx *compoundContext, fileId *FileId, open
 
 	// Check if Windows wants to delete the file or clear the delete flag
 	deleteRequested := info.DeletePending() != 0
-	log.Debugf("setDispositionInfo: DeletePending=%d", info.DeletePending())
+	log.Tracef("setDispositionInfo: DeletePending=%d", info.DeletePending())
 
 	if !deleteRequested {
 		// Windows is clearing the delete flag
@@ -2065,7 +2104,7 @@ func (t *fileTree) setDispositionInfo(ctx *compoundContext, fileId *FileId, open
 				}
 			}
 			if !isEmpty {
-				log.Debugf("Delete failed: directory not empty: %v", err)
+				log.Tracef("Delete failed: directory not empty: %v", err)
 				rsp := new(ErrorResponse)
 				PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_DIRECTORY_NOT_EMPTY))
 				return c.sendPacket(rsp, &t.treeConn, ctx)
@@ -2101,7 +2140,7 @@ func (t *fileTree) setRename(ctx *compoundContext, fileId *FileId, pkt []byte) e
 	r := SetInfoRequestDecoder(res)
 	info := FileRenameInformationInfoDecoder(r.Buffer())
 
-	log.Debugf("setRename %s, root %d", info.FileName(), info.RootDirectory())
+	log.Tracef("setRename %s, root %d", info.FileName(), info.RootDirectory())
 	to := strings.ReplaceAll(info.FileName(), "\\", "/")
 	open := t.conn.serverCtx.getOpen(fileId.HandleId())
 	if err := t.fs.Rename(vfs.VfsHandle(fileId.HandleId()), to, int(info.ReplaceIfExists())); err != nil {
@@ -2133,7 +2172,7 @@ func (t *fileTree) setRename(ctx *compoundContext, fileId *FileId, pkt []byte) e
 }
 
 func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) error {
-	log.Debugf("setSecInfo")
+	log.Tracef("setSecInfo")
 	c := t.session.conn
 
 	res, _ := accept(SMB2_SET_INFO, pkt)
@@ -2148,7 +2187,7 @@ func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) 
 		sid := SidDecoder(ownerBuf)
 		if !sid.IsInvalid() {
 			subs := sid.SubAuthority()
-			log.Debugf("setSecInfo: owner SID auth=%d subs=%v", sid.IdentifierAuthority(), subs)
+			log.Tracef("setSecInfo: owner SID auth=%d subs=%v", sid.IdentifierAuthority(), subs)
 			if sid.IdentifierAuthority() == 22 && sid.SubAuthorityCount() == 2 && subs[0] == 1 {
 				a.SetUID(subs[1])
 				changed = true
@@ -2158,7 +2197,7 @@ func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) 
 			}
 		}
 	} else {
-		log.Debugf("setSecInfo: no owner SID")
+		log.Tracef("setSecInfo: no owner SID")
 	}
 
 	// Check Group SID for POSIX gid (S-1-22-2-<gid>) or NFS gid (S-1-5-88-2-<gid>)
@@ -2166,7 +2205,7 @@ func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) 
 		sid := SidDecoder(groupBuf)
 		if !sid.IsInvalid() {
 			subs := sid.SubAuthority()
-			log.Debugf("setSecInfo: group SID auth=%d subs=%v", sid.IdentifierAuthority(), subs)
+			log.Tracef("setSecInfo: group SID auth=%d subs=%v", sid.IdentifierAuthority(), subs)
 			if sid.IdentifierAuthority() == 22 && sid.SubAuthorityCount() == 2 && subs[0] == 2 {
 				a.SetGID(subs[1])
 				changed = true
@@ -2176,13 +2215,13 @@ func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) 
 			}
 		}
 	} else {
-		log.Debugf("setSecInfo: no group SID")
+		log.Tracef("setSecInfo: no group SID")
 	}
 
 	// Try to extract NFS mode SID from DACL or convert standard ACLs to mode
 	if daclBuf := sd.Dacl(); daclBuf != nil {
 		dacl := AclDecoder(daclBuf)
-		log.Debugf("setSecInfo: DACL with %d ACEs", dacl.AceCount())
+		log.Tracef("setSecInfo: DACL with %d ACEs", dacl.AceCount())
 		aceBuf := dacl.Aces()
 		foundNfsMode := false
 		for i := 0; i < int(dacl.AceCount()); i++ {
@@ -2190,11 +2229,11 @@ func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) 
 			sidBuf := ace.Sid()
 			sid := SidDecoder(sidBuf)
 			subs := sid.SubAuthority()
-			log.Debugf("setSecInfo: ACE[%d] type=%d mask=0x%x auth=%d subs=%v", i, ace.Type(), ace.Mask(), sid.IdentifierAuthority(), subs)
+			log.Tracef("setSecInfo: ACE[%d] type=%d mask=0x%x auth=%d subs=%v", i, ace.Type(), ace.Mask(), sid.IdentifierAuthority(), subs)
 			if sid.SubAuthorityCount() == 3 && subs[0] == 88 && subs[1] == 3 {
 				// NFS Mode Sid - apply Unix permissions
 				mode := subs[2]
-				log.Debugf("setSecInfo: NFS mode SID found, mode=0%o", mode)
+				log.Tracef("setSecInfo: NFS mode SID found, mode=0%o", mode)
 				a.SetUnixMode(mode)
 				changed = true
 				foundNfsMode = true
@@ -2203,7 +2242,7 @@ func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) 
 			aceBuf = aceBuf[ace.Size():]
 		}
 		if !foundNfsMode {
-			log.Debugf("setSecInfo: no NFS mode SID, deriving mode from ACE masks")
+			log.Tracef("setSecInfo: no NFS mode SID, deriving mode from ACE masks")
 			// Derive Unix mode from standard Windows ACE access masks
 			ownerMode := uint32(0)
 			groupMode := uint32(0)
@@ -2249,16 +2288,16 @@ func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) 
 			}
 			if derivedMode {
 				mode := (ownerMode << 6) | (groupMode << 3) | otherMode
-				log.Debugf("setSecInfo: derived mode=0%o (owner=%d group=%d other=%d)", mode, ownerMode, groupMode, otherMode)
+				log.Tracef("setSecInfo: derived mode=0%o (owner=%d group=%d other=%d)", mode, ownerMode, groupMode, otherMode)
 				a.SetUnixMode(mode)
 				changed = true
 			}
 		}
 	} else {
-		log.Debugf("setSecInfo: no DACL")
+		log.Tracef("setSecInfo: no DACL")
 	}
 
-	log.Debugf("setSecInfo: changed=%v", changed)
+	log.Tracef("setSecInfo: changed=%v", changed)
 	if changed {
 		t.fs.SetAttr(vfs.VfsHandle(fileId.HandleId()), a)
 	}
@@ -2272,7 +2311,7 @@ func (t *fileTree) setSecInfo(ctx *compoundContext, fileId *FileId, pkt []byte) 
 }
 
 func (t *fileTree) setPosixInfo(ctx *compoundContext, fileId *FileId, pkt []byte) error {
-	log.Debugf("setPosixInfo")
+	log.Tracef("setPosixInfo")
 	c := t.session.conn
 
 	res, _ := accept(SMB2_SET_INFO, pkt)
@@ -2340,7 +2379,7 @@ func (t *fileTree) setPosixInfo(ctx *compoundContext, fileId *FileId, pkt []byte
 }
 
 func (t *fileTree) setInfo(ctx *compoundContext, pkt []byte) error {
-	log.Debugf("SetInfo")
+	log.Tracef("SetInfo")
 	c := t.session.conn
 
 	res, _ := accept(SMB2_SET_INFO, pkt)
@@ -2366,7 +2405,7 @@ func (t *fileTree) setInfo(ctx *compoundContext, pkt []byte) error {
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
-	log.Debugf("SetInfo: %d class", r.FileInfoClass())
+	log.Tracef("SetInfo: %d class", r.FileInfoClass())
 
 	// Flush any pending writes to ensure data is on disk before SetInfo
 	t.fs.Flush(vfs.VfsHandle(fileId.HandleId()))

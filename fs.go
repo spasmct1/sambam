@@ -10,17 +10,25 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/sambam/sambam/smb/vfs"
 )
 
 type OpenFile struct {
-	path      string
-	isDir     bool
-	f         *os.File
-	h         vfs.VfsHandle
-	dirPos    int
-	dirBuffer []vfs.DirInfo
+	path       string
+	isDir      bool
+	f          *os.File
+	h          vfs.VfsHandle
+	dirPos     int
+	dirBuffer  []vfs.DirInfo
+	readOnce   sync.Once
+	mode       string
+	statsMu    sync.Mutex
+	readBytes  uint64
+	writeBytes uint64
+	hadRead    bool
+	hadWrite   bool
 }
 
 type PassthroughFS struct {
@@ -32,10 +40,30 @@ type PassthroughFS struct {
 	OnCreate    func(path string, isDir bool)
 	OnOverwrite func(path string)
 	OnDelete    func(path string)
+	OnRead      func(path string)
+	OnOpen      func(path string, mode string)
+	OnClose     func(path string, mode string, readBytes uint64, writeBytes uint64)
+	OnSlowOp    func(op string, path string, duration time.Duration, size int)
 }
 
 func (fs *PassthroughFS) BasePath() string {
 	return fs.rootPath
+}
+
+func (fs *PassthroughFS) relativePath(fullPath string) string {
+	rel := strings.TrimPrefix(fullPath, fs.rootPath)
+	rel = strings.TrimPrefix(rel, "/")
+	return rel
+}
+
+func openMode(flags int) string {
+	if flags&os.O_RDWR != 0 {
+		return "read-write"
+	}
+	if flags&os.O_WRONLY != 0 {
+		return "write"
+	}
+	return "read"
 }
 
 func NewPassthroughFS(rootPath string, readOnly bool) *PassthroughFS {
@@ -160,6 +188,7 @@ func randHandle() uint64 {
 
 func (fs *PassthroughFS) Open(p string, flags int, mode int) (vfs.VfsHandle, error) {
 	fullPath := path.Join(fs.rootPath, p)
+	fileMode := openMode(flags)
 
 	// Check if file exists before opening (to detect creation)
 	isCreate := flags&os.O_CREATE != 0
@@ -168,6 +197,7 @@ func (fs *PassthroughFS) Open(p string, flags int, mode int) (vfs.VfsHandle, err
 	// If read-only, force read-only flags
 	if fs.readOnly {
 		flags = os.O_RDONLY
+		fileMode = "read"
 	}
 
 	f, err := os.OpenFile(fullPath, flags, os.FileMode(mode))
@@ -183,7 +213,11 @@ func (fs *PassthroughFS) Open(p string, flags int, mode int) (vfs.VfsHandle, err
 	}
 
 	h := vfs.VfsHandle(randHandle())
-	fs.openFiles.Store(h, &OpenFile{f: f, h: h, path: fullPath})
+	fs.openFiles.Store(h, &OpenFile{f: f, h: h, path: fullPath, mode: fileMode})
+
+	if fs.OnOpen != nil {
+		fs.OnOpen(fs.relativePath(fullPath), fileMode)
+	}
 
 	return h, nil
 }
@@ -198,6 +232,19 @@ func (fs *PassthroughFS) Close(handle vfs.VfsHandle) error {
 	if open.f != nil {
 		open.f.Close()
 	}
+
+	open.statsMu.Lock()
+	readBytes := open.readBytes
+	writeBytes := open.writeBytes
+	hadRead := open.hadRead
+	hadWrite := open.hadWrite
+	mode := open.mode
+	open.statsMu.Unlock()
+
+	if fs.OnClose != nil && (hadRead || hadWrite) {
+		fs.OnClose(fs.relativePath(open.path), mode, readBytes, writeBytes)
+	}
+
 	fs.openFiles.Delete(handle)
 
 	return nil
@@ -256,7 +303,24 @@ func (fs *PassthroughFS) Read(handle vfs.VfsHandle, buf []byte, offset uint64, f
 	}
 	open := v.(*OpenFile)
 
+	start := time.Now()
 	n, err := open.f.ReadAt(buf, int64(offset))
+	duration := time.Since(start)
+	if n > 0 && fs.OnRead != nil {
+		relPath := fs.relativePath(open.path)
+		open.readOnce.Do(func() {
+			fs.OnRead(relPath)
+		})
+	}
+	if n > 0 {
+		open.statsMu.Lock()
+		open.readBytes += uint64(n)
+		open.hadRead = true
+		open.statsMu.Unlock()
+	}
+	if fs.OnSlowOp != nil && duration > 200*time.Millisecond {
+		fs.OnSlowOp("read", fs.relativePath(open.path), duration, n)
+	}
 	// If file was closed during read (race with Close), return EOF
 	if err != nil && (os.IsNotExist(err) || isClosedError(err)) {
 		return n, io.EOF
@@ -289,7 +353,19 @@ func (fs *PassthroughFS) Write(handle vfs.VfsHandle, buf []byte, offset uint64, 
 	}
 	open := v.(*OpenFile)
 
-	return open.f.WriteAt(buf, int64(offset))
+	start := time.Now()
+	n, err := open.f.WriteAt(buf, int64(offset))
+	duration := time.Since(start)
+	if n > 0 {
+		open.statsMu.Lock()
+		open.writeBytes += uint64(n)
+		open.hadWrite = true
+		open.statsMu.Unlock()
+	}
+	if fs.OnSlowOp != nil && duration > 200*time.Millisecond {
+		fs.OnSlowOp("write", fs.relativePath(open.path), duration, n)
+	}
+	return n, err
 }
 
 func (fs *PassthroughFS) OpenDir(p string) (vfs.VfsHandle, error) {
@@ -352,9 +428,14 @@ func (fs *PassthroughFS) ReadDir(handle vfs.VfsHandle, pos int, maxEntries int) 
 		}
 	}
 
+	start := time.Now()
 	entries, err := open.f.ReadDir(maxEntries)
+	duration := time.Since(start)
 	if err != nil && err != io.EOF {
 		return nil, err
+	}
+	if fs.OnSlowOp != nil && duration > 200*time.Millisecond {
+		fs.OnSlowOp("query-dir", fs.relativePath(open.path), duration, len(entries))
 	}
 
 	for _, entry := range entries {

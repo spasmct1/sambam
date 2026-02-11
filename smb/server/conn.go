@@ -96,7 +96,8 @@ func (r *outstandingRequests) shutdown(err error) {
 }
 
 type conn struct {
-	t transport
+	t          transport
+	remoteAddr string
 
 	session                   *session
 	outstandingRequests       *outstandingRequests
@@ -220,7 +221,7 @@ func (conn *conn) runSender() {
 	for {
 		select {
 		case <-conn.wdone:
-			log.Debugf("runsender finished")
+			log.Tracef("runsender finished")
 			return
 		case pkt := <-conn.write:
 			_, err := conn.t.Write(pkt)
@@ -266,7 +267,7 @@ func (conn *conn) runReciever() {
 			if s := conn.session; s != nil {
 				if p.Command() != SMB2_NEGOTIATE && p.Command() != SMB2_SESSION_SETUP &&
 					p.Command() != SMB2_ECHO && s.sessionId != p.SessionId() {
-					log.Debugf("skip: unknown session id (cmd %d, expected %d, got %d)", p.Command(), s.sessionId, p.SessionId())
+					log.Tracef("skip: unknown session id (cmd %d, expected %d, got %d)", p.Command(), s.sessionId, p.SessionId())
 					continue
 				}
 
@@ -310,7 +311,7 @@ func (conn *conn) runReciever() {
 			if hasSession {
 				e = conn.tryVerify(pkt, isEncrypted)
 				if e != nil {
-					log.Errorf("verify error: %v", err)
+					log.Errorf("verify error: %v", e)
 				}
 			}
 
@@ -344,7 +345,7 @@ exit:
 
 	conn.err = err
 
-	log.Debugf("receiver finished")
+	log.Tracef("receiver finished")
 
 	conn.shutdown()
 }

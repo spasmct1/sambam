@@ -32,7 +32,7 @@ func (t *ipcTree) create(ctx *compoundContext, pkt []byte) error {
 		return &InvalidRequestError{"broken create format"}
 	}
 
-	log.Debugf("create name: %s", r.Name())
+	log.Tracef("create name: %s", r.Name())
 	rsp := new(CreateResponse)
 	PrepareResponse(&rsp.PacketHeader, pkt, 0)
 

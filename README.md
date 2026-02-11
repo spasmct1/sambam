@@ -116,6 +116,11 @@ sudo sambam --expire 30m /data
 
 Show real-time connection and file activity.
 
+Use verbosity levels:
+- `-v` basic activity
+- `-vv` extended diagnostics (open mode, read events, close summaries, slow ops, auth failures)
+- `-vvv` full protocol trace (includes `-v` and `-vv`)
+
 ```
   15:04:05 connect 192.168.1.100:54321
   15:04:10 [share] create file documents/report.docx
@@ -123,9 +128,9 @@ Show real-time connection and file activity.
   15:04:15 [share] delete temp/old-file.txt
 ```
 
-### `--debug`
+### `--trace`
 
-Includes everything from `--verbose` plus low-level SMB protocol details (negotiate, session setup, tree connect, query info, etc.). Useful for troubleshooting protocol issues.
+Shows full protocol trace output. Equivalent to `-vvv`.
 
 ### `--hide-dotfiles`
 
@@ -173,9 +178,11 @@ readonly = false
 
 # Show connections and file activity
 verbose = true
+# verbose_level = 2   # equivalent to -vv
 
-# Show verbose output plus protocol-level details
-# debug = true
+# Show full protocol trace (very verbose)
+# trace = true
+# verbose_level = 3   # equivalent to -vvv
 
 # Hide files starting with '.'
 # hide_dotfiles = true

@@ -34,7 +34,9 @@ type Config struct {
 	Listen       string            `toml:"listen"`
 	Readonly     bool              `toml:"readonly"`
 	Verbose      bool              `toml:"verbose"`
-	Debug        bool              `toml:"debug"`
+	VerboseLevel int               `toml:"verbose_level"`
+	Debug        bool              `toml:"debug"` // backward compatibility: maps to verbose_level=3
+	Trace        bool              `toml:"trace"`
 	HideDotfiles bool              `toml:"hide_dotfiles"`
 	Username     string            `toml:"username"`
 	Password     string            `toml:"password"`
@@ -65,14 +67,35 @@ func loadConfig() *Config {
 	return &config
 }
 
-// verboseFormatter formats logrus entries to match the callback output style:
+// logFormatter formats logrus entries to match sambam output style:
 //
 //	16:47:19 authenticated: guest
-type verboseFormatter struct{}
+type logFormatter struct {
+	showLevel bool
+}
 
-func (f *verboseFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+func (f *logFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	ts := Dim(entry.Time.Format("15:04:05"))
-	return []byte(fmt.Sprintf("  %s %s\n", ts, entry.Message)), nil
+	if !f.showLevel {
+		return []byte(fmt.Sprintf("  %s %s\n", ts, entry.Message)), nil
+	}
+
+	level := strings.ToUpper(entry.Level.String())
+	levelTag := "[" + level + "]"
+	switch entry.Level {
+	case logrus.TraceLevel:
+		levelTag = Dim("[TRC]")
+	case logrus.DebugLevel:
+		levelTag = Cyan("[DBG]")
+	case logrus.InfoLevel:
+		levelTag = Green("[INF]")
+	case logrus.WarnLevel:
+		levelTag = Yellow("[WRN]")
+	case logrus.ErrorLevel, logrus.FatalLevel, logrus.PanicLevel:
+		levelTag = Red("[ERR]")
+	}
+
+	return []byte(fmt.Sprintf("  %s %s %s\n", ts, levelTag, entry.Message)), nil
 }
 
 // generatePassword creates a random alphanumeric password
@@ -87,7 +110,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.4.6"
+	version = "1.4.7"
 )
 
 func main() {
@@ -113,8 +136,8 @@ func main() {
 	logFile := pflag.StringP("logfile", "L", "", "Log file path (daemon mode)")
 
 	// Verbosity flags
-	verbose := pflag.BoolP("verbose", "v", false, "Show connections and file activity")
-	debugMode := pflag.Bool("debug", false, "Show verbose output plus protocol-level details")
+	verbose := pflag.CountP("verbose", "v", "Show connections and file activity (-vv extended, -vvv full trace)")
+	traceMode := pflag.Bool("trace", false, "Show full protocol trace (very verbose)")
 
 	// Hidden files flag
 	hideDotfiles := pflag.Bool("hide-dotfiles", false, "Hide files starting with '.'")
@@ -136,11 +159,17 @@ func main() {
 		if !pflag.CommandLine.Changed("readonly") && config.Readonly {
 			*readOnly = true
 		}
-		if !pflag.CommandLine.Changed("verbose") && config.Verbose {
-			*verbose = true
+		if !pflag.CommandLine.Changed("verbose") {
+			if config.VerboseLevel > 0 {
+				*verbose = config.VerboseLevel
+			} else if config.Verbose {
+				*verbose = 1
+			} else if config.Debug {
+				*verbose = 3
+			}
 		}
-		if !pflag.CommandLine.Changed("debug") && config.Debug {
-			*debugMode = true
+		if !pflag.CommandLine.Changed("trace") && config.Trace {
+			*traceMode = true
 		}
 		if !pflag.CommandLine.Changed("username") && config.Username != "" {
 			*username = config.Username
@@ -163,14 +192,23 @@ func main() {
 	}
 
 	// Set log level and formatter
-	if *debugMode {
+	if *traceMode {
+		logrus.SetLevel(logrus.TraceLevel)
+		logrus.SetFormatter(&logFormatter{showLevel: true})
+	} else if *verbose >= 3 {
+		logrus.SetLevel(logrus.TraceLevel)
+		logrus.SetFormatter(&logFormatter{showLevel: true})
+	} else if *verbose >= 2 {
 		logrus.SetLevel(logrus.DebugLevel)
-	} else if *verbose {
+		logrus.SetFormatter(&logFormatter{showLevel: true})
+	} else if *verbose > 0 {
 		logrus.SetLevel(logrus.InfoLevel)
-		logrus.SetFormatter(&verboseFormatter{})
+		logrus.SetFormatter(&logFormatter{showLevel: false})
 	} else {
 		logrus.SetLevel(logrus.ErrorLevel)
 	}
+
+	extraVerbose := *verbose >= 2
 
 	if *showHelp {
 		printUsage()
@@ -317,8 +355,8 @@ func main() {
 	for _, share := range shares {
 		fs := NewPassthroughFS(share.Path, *readOnly)
 
-		// Setup filesystem callbacks for verbose/debug mode
-		if *verbose || *debugMode {
+		// Setup filesystem callbacks for verbose mode
+		if *verbose > 0 {
 			fs.OnCreate = func(path string, isDir bool) {
 				timestamp := time.Now().Format("15:04:05")
 				typeStr := "file"
@@ -348,6 +386,41 @@ func main() {
 				}
 			}
 		}
+		if extraVerbose {
+			fs.OnOpen = func(path string, mode string) {
+				timestamp := time.Now().Format("15:04:05")
+				if *daemonMode {
+					log.Printf("open: %s (%s)", path, mode)
+				} else {
+					fmt.Printf("  %s %s %s %s\n", Dim(timestamp), Cyan("open:"), path, Dim("("+mode+")"))
+				}
+			}
+			fs.OnRead = func(path string) {
+				timestamp := time.Now().Format("15:04:05")
+				if *daemonMode {
+					log.Printf("read: %s", path)
+				} else {
+					fmt.Printf("  %s %s %s\n", Dim(timestamp), Cyan("read:"), path)
+				}
+			}
+			fs.OnClose = func(path string, mode string, readBytes uint64, writeBytes uint64) {
+				timestamp := time.Now().Format("15:04:05")
+				summary := fmt.Sprintf("r=%s w=%s", formatBytes(readBytes), formatBytes(writeBytes))
+				if *daemonMode {
+					log.Printf("close: %s (%s) %s", path, mode, summary)
+				} else {
+					fmt.Printf("  %s %s %s %s %s\n", Dim(timestamp), Cyan("close:"), path, Dim("("+mode+")"), Dim(summary))
+				}
+			}
+			fs.OnSlowOp = func(op string, path string, duration time.Duration, size int) {
+				timestamp := time.Now().Format("15:04:05")
+				if *daemonMode {
+					log.Printf("slow: %s %s took %s size=%d", op, path, duration.Round(time.Millisecond), size)
+				} else {
+					fmt.Printf("  %s %s %s %s %s\n", Dim(timestamp), Yellow("slow:"), op, path, Dim(duration.Round(time.Millisecond).String()))
+				}
+			}
+		}
 
 		vfsShares[share.Name] = fs
 	}
@@ -362,7 +435,8 @@ func main() {
 	var onConnect func(string)
 	var onRename func(string, string)
 	var onDetect func(string, string)
-	if *verbose || *debugMode {
+	var onAuthFail func(string, string)
+	if *verbose > 0 {
 		onConnect = func(remoteAddr string) {
 			timestamp := time.Now().Format("15:04:05")
 			if *daemonMode {
@@ -401,6 +475,19 @@ func main() {
 			}
 		}
 	}
+	if extraVerbose {
+		onAuthFail = func(remoteAddr, username string) {
+			timestamp := time.Now().Format("15:04:05")
+			if username == "" {
+				username = "<unknown>"
+			}
+			if *daemonMode {
+				log.Printf("auth fail: %s user=%s", remoteAddr, username)
+			} else {
+				fmt.Printf("  %s %s %s %s\n", Dim(timestamp), Red("auth fail:"), remoteAddr, Dim("user="+username))
+			}
+		}
+	}
 
 	// Setup authentication
 	userPassword := map[string]string{}
@@ -424,6 +511,7 @@ func main() {
 			OnConnect:    onConnect,
 			OnRename:     onRename,
 			OnDetect:     onDetect,
+			OnAuthFail:   onAuthFail,
 		},
 		&smb2.NTLMAuthenticator{
 			TargetSPN:    "",
@@ -550,6 +638,19 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm %ds", m, s)
 	}
 	return fmt.Sprintf("%ds", s)
+}
+
+func formatBytes(n uint64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := uint64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []string, portSuffix string, username string, password string, expireStr string) {
@@ -682,8 +783,8 @@ func printUsage() {
 	fmt.Printf("        %s  %s\n", Green("--username"), "Require authentication")
 	fmt.Printf("        %s  %s\n", Green("--password"), "Password "+Dim("(random if not set)"))
 	fmt.Printf("        %s    %s\n", Green("--expire"), "Auto-shutdown after duration "+Dim("(e.g., 30m, 1h)"))
-	fmt.Printf("    %s, %s   %s\n", Green("-v"), Green("--verbose"), "Show connections and file activity")
-	fmt.Printf("        %s     %s\n", Green("--debug"), "Verbose output plus protocol-level details")
+	fmt.Printf("    %s, %s   %s\n", Green("-v"), Green("--verbose"), "Show connections and file activity "+Dim("(-vv extended, -vvv full trace)"))
+	fmt.Printf("        %s     %s\n", Green("--trace"), "Full protocol trace (very verbose)")
 	fmt.Printf("        %s\n", Green("--hide-dotfiles")+"  Hide files starting with '.'")
 	fmt.Printf("    %s, %s    %s\n", Green("-d"), Green("--daemon"), "Run as background daemon")
 	fmt.Printf("    %s, %s   %s\n", Green("-p"), Green("--pidfile"), "PID file location "+Dim("(default: /tmp/sambam.pid)"))
