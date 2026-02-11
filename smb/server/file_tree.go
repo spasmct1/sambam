@@ -1,6 +1,7 @@
 package smb2
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -218,7 +219,9 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		if isSymlink {
 			// Always open symlinks with O_PATH|O_NOFOLLOW — let client resolve
 			flags = 0x200000 | 0x20000 // O_PATH | O_NOFOLLOW
-		} else if r.CreateOptions()&FILE_OPEN_REPARSE_POINT != 0 && fileExists {
+		} else if r.CreateOptions()&FILE_OPEN_REPARSE_POINT != 0 && fileExists && attrs.GetFileType() == vfs.FileTypeSymlink {
+			// FILE_OPEN_REPARSE_POINT should only force path-open for actual reparse points.
+			// Applying O_PATH to regular files breaks data reads (all reads return EOF).
 			flags |= 0x200000 | 0x20000 // O_PATH | O_NOFOLLOW — open symlink itself
 		}
 
@@ -614,40 +617,83 @@ func (t *fileTree) flush(ctx *compoundContext, pkt []byte) error {
 	return c.sendPacket(rsp, &t.treeConn, ctx)
 }
 
-func (t *fileTree) readEA(ctx *compoundContext, fileId *FileId, open *Open, buf []byte, pkt []byte) error {
+func (t *fileTree) readEA(ctx *compoundContext, fileId *FileId, open *Open, pkt []byte, off uint64, length uint32) error {
 	c := t.session.conn
+	log.Tracef("readEA req: file=%s stream=%s off=%d len=%d", open.pathName, open.eaKey, off, length)
 
 	status := uint32(0) //STATUS_END_OF_FILE
-	n, err := t.fs.Getxattr(vfs.VfsHandle(fileId.HandleId()), open.eaKey, buf)
+	total, err := t.fs.Getxattr(vfs.VfsHandle(fileId.HandleId()), open.eaKey, nil)
+	n := 0
 
 	if err != nil {
-		status = uint32(STATUS_ACCESS_DENIED)
-	} else if n == 0 {
-		status = uint32(STATUS_END_OF_FILE)
+		// Missing stream/xattr is normal for Windows metadata probes.
+		// Returning ACCESS_DENIED causes aggressive client retries.
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENODATA) {
+			status = uint32(STATUS_OBJECT_NAME_NOT_FOUND)
+		} else {
+			status = uint32(STATUS_ACCESS_DENIED)
+		}
+	} else if total == 0 || int64(off) >= int64(total) {
+		// For ADS/xattr stream reads, return success with zero-length payload
+		// at/end-of-stream. Explorer probes Zone.Identifier repeatedly and is
+		// sensitive to EOF-style error statuses here.
+		rsp := new(ReadResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, 0)
+		rsp.DataRemaining = 0
+		rsp.Data = nil
+		log.Tracef("readEA rsp: file=%s stream=%s n=0 eof=true", open.pathName, open.eaKey)
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	} else {
+		full := make([]byte, total)
+		nfull, err := t.fs.Getxattr(vfs.VfsHandle(fileId.HandleId()), open.eaKey, full)
+		if err != nil {
+			status = uint32(STATUS_ACCESS_DENIED)
+		} else {
+			start := int(off)
+			end := start + int(length)
+			if end > nfull {
+				end = nfull
+			}
+			if start < 0 || start > nfull || end < start {
+				status = uint32(STATUS_END_OF_FILE)
+			} else {
+				data := full[start:end]
+				n = len(data)
+				rsp := new(ReadResponse)
+				PrepareResponse(&rsp.PacketHeader, pkt, 0)
+				rsp.DataRemaining = 0
+				rsp.Data = data
+				log.Tracef("readEA rsp: file=%s stream=%s n=%d", open.pathName, open.eaKey, n)
+				return c.sendPacket(rsp, &t.treeConn, ctx)
+			}
+		}
 	}
 
 	if status != 0 {
 		// special cases for Apple
-		if open.eaKey == "AFP_AfpInfo" && len(buf) == 60 {
+		if open.eaKey == "AFP_AfpInfo" && length == 60 {
 			info := AfpInfo{
 				Signature: [4]byte{'A', 'F', 'P', '_'},
 				//Version:   [4]byte{0x00, 0x01, 0x00, 0x00},
 			}
+			buf := make([]byte, 60)
 			info.Encode(buf)
 			n = 60
 			//t.fs.Setxattr(h, open.eaKey, buf)
+			rsp := new(ReadResponse)
+			PrepareResponse(&rsp.PacketHeader, pkt, 0)
+			rsp.DataRemaining = 0
+			rsp.Data = buf[:n]
+			log.Tracef("readEA rsp: file=%s stream=%s n=%d", open.pathName, open.eaKey, n)
+			return c.sendPacket(rsp, &t.treeConn, ctx)
 		} else {
+			log.Tracef("readEA err: file=%s stream=%s status=0x%x err=%v", open.pathName, open.eaKey, status, err)
 			rsp := new(ErrorResponse)
 			PrepareResponse(rsp.Header(), pkt, status)
 			return c.sendPacket(rsp, &t.treeConn, ctx)
 		}
 	}
-
-	rsp := new(ReadResponse)
-	PrepareResponse(&rsp.PacketHeader, pkt, 0)
-	rsp.DataRemaining = 0
-	rsp.Data = buf[:n]
-	return c.sendPacket(rsp, &t.treeConn, ctx)
+	return nil
 
 }
 
@@ -678,23 +724,10 @@ func (t *fileTree) read(ctx *compoundContext, pkt []byte) error {
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
-	// async read
-	asyncId := randint64()
-	if ctx != nil || open.isEa {
-		return t.readImpl(ctx, pkt, fileId, open, 0)
-	}
-
-	go func() {
-		t.ioReadSem <- struct{}{}
-		defer func() { <-t.ioReadSem }()
-
-		rsp := new(ErrorResponse)
-		PrepareAsyncResponse(rsp.Header(), pkt, asyncId, uint32(STATUS_PENDING))
-		c.sendPacket(rsp, &t.treeConn, ctx)
-
-		t.readImpl(ctx, pkt, fileId, open, asyncId)
-	}()
-	return nil
+	// Serve reads synchronously to avoid client-visible corruption/regressions.
+	t.ioReadSem <- struct{}{}
+	defer func() { <-t.ioReadSem }()
+	return t.readImpl(ctx, pkt, fileId, open, 0)
 }
 
 func (t *fileTree) readImpl(ctx *compoundContext, pkt []byte, fileId *FileId, open *Open, asyncId uint64) error {
@@ -702,16 +735,26 @@ func (t *fileTree) readImpl(ctx *compoundContext, pkt []byte, fileId *FileId, op
 
 	res, _ := accept(SMB2_READ, pkt)
 	r := ReadRequestDecoder(res)
+	log.Tracef("read req: file=%s off=%d len=%d min=%d flags=0x%x", open.pathName, r.Offset(), r.Length(), r.MinimumCount(), r.Flags())
 
 	buf := make([]byte, r.Length())
 	var n int
 	var err error
 
 	if open.isEa {
-		return t.readEA(ctx, fileId, open, buf, pkt)
+		return t.readEA(ctx, fileId, open, pkt, r.Offset(), r.Length())
 	}
 
 	n, err = t.fs.Read(vfs.VfsHandle(fileId.HandleId()), buf, r.Offset(), 0)
+	if n > 0 {
+		head := n
+		if head > 16 {
+			head = 16
+		}
+		log.Tracef("read rsp: file=%s off=%d n=%d err=%v head=%x", open.pathName, r.Offset(), n, err, buf[:head])
+	} else {
+		log.Tracef("read rsp: file=%s off=%d n=%d err=%v", open.pathName, r.Offset(), n, err)
+	}
 	if err != nil && n == 0 {
 		status := STATUS_ACCESS_DENIED
 		if err == io.EOF {
@@ -724,12 +767,20 @@ func (t *fileTree) readImpl(ctx *compoundContext, pkt []byte, fileId *FileId, op
 			log.Errorf("Read: %v", err)
 		}
 		rsp := new(ErrorResponse)
-		PrepareAsyncResponse(rsp.Header(), pkt, asyncId, uint32(status))
+		if asyncId == 0 {
+			PrepareResponse(rsp.Header(), pkt, uint32(status))
+		} else {
+			PrepareAsyncResponse(rsp.Header(), pkt, asyncId, uint32(status))
+		}
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
 	rsp := new(ReadResponse)
-	PrepareAsyncResponse(&rsp.PacketHeader, pkt, asyncId, 0)
+	if asyncId == 0 {
+		PrepareResponse(&rsp.PacketHeader, pkt, 0)
+	} else {
+		PrepareAsyncResponse(&rsp.PacketHeader, pkt, asyncId, 0)
+	}
 	rsp.DataRemaining = 0
 	rsp.Data = buf[:n]
 
@@ -795,13 +846,17 @@ func (t *fileTree) writeImpl(ctx *compoundContext, pkt []byte, fileId *FileId, o
 	r := WriteRequestDecoder(res)
 
 	if open.isEa {
+		open.ioMu.Lock()
 		log.Tracef("write ea: key %s, val %s", open.eaKey, r.Data())
 		// ignore xattr errors
 		t.fs.Setxattr(vfs.VfsHandle(fileId.HandleId()), open.eaKey, r.Data())
+		open.ioMu.Unlock()
 		n = len(r.Data())
 	} else {
 		log.Tracef("Write: %d offset %d", r.Length(), r.Offset())
+		open.ioMu.Lock()
 		n, err = t.fs.Write(vfs.VfsHandle(fileId.HandleId()), r.Data(), r.Offset(), int(r.Flags()))
+		open.ioMu.Unlock()
 	}
 
 	if err != nil || n == 0 {
@@ -1812,9 +1867,9 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 			}
 		}
 	case FileNormalizedNameInformation:
-		rsp := new(ErrorResponse)
-		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
-		return c.sendPacket(rsp, &t.treeConn, ctx)
+		info = &FileNormalizedNameInformationInfo{
+			FileName: strings.ReplaceAll(name, "/", "\\"),
+		}
 	case FileInternalInformation:
 		info = &FileInternalInformationInfo{
 			int64(a.GetInodeNumber()),
@@ -1987,8 +2042,10 @@ func (t *fileTree) queryInfo(ctx *compoundContext, pkt []byte) error {
 		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
-
-	return nil
+	log.Errorf("queryInfo: unsupported info type %d", r.InfoType())
+	rsp := new(ErrorResponse)
+	PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+	return c.sendPacket(rsp, &t.treeConn, ctx)
 }
 
 func (t *fileTree) setBasicInfo(ctx *compoundContext, fileId *FileId, open *Open, pkt []byte) error {
@@ -2039,20 +2096,28 @@ func (t *fileTree) setBasicInfo(ctx *compoundContext, fileId *FileId, open *Open
 	return c.sendPacket(rsp, &t.treeConn, ctx)
 }
 
-func (t *fileTree) setEndOfFileInfo(ctx *compoundContext, fileId *FileId, pkt []byte) error {
+func (t *fileTree) setEndOfFileInfo(ctx *compoundContext, fileId *FileId, open *Open, pkt []byte) error {
 	c := t.session.conn
 
 	res, _ := accept(SMB2_SET_INFO, pkt)
 	r := SetInfoRequestDecoder(res)
 	info := FileEndOfFileInformationDecoder(r.Buffer())
-	t.fs.Truncate(vfs.VfsHandle(fileId.HandleId()), uint64(info.EndOfFile()))
+	open.ioMu.Lock()
+	err := t.fs.Truncate(vfs.VfsHandle(fileId.HandleId()), uint64(info.EndOfFile()))
+	open.ioMu.Unlock()
+	if err != nil {
+		log.Errorf("setEndOfFileInfo: truncate failed: %v", err)
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
 
 	rsp := new(SetInfoResponse)
 	PrepareResponse(&rsp.PacketHeader, pkt, 0)
 	return c.sendPacket(rsp, &t.treeConn, ctx)
 }
 
-func (t *fileTree) setEndOfFileInfoEa(ctx *compoundContext, fileId *FileId, eaKey string, pkt []byte) error {
+func (t *fileTree) setEndOfFileInfoEa(ctx *compoundContext, fileId *FileId, open *Open, eaKey string, pkt []byte) error {
 	c := t.session.conn
 
 	res, _ := accept(SMB2_SET_INFO, pkt)
@@ -2060,7 +2125,9 @@ func (t *fileTree) setEndOfFileInfoEa(ctx *compoundContext, fileId *FileId, eaKe
 	info := FileEndOfFileInformationDecoder(r.Buffer())
 
 	v := make([]byte, info.EndOfFile())
+	open.ioMu.Lock()
 	t.fs.Setxattr(vfs.VfsHandle(fileId.HandleId()), eaKey, v)
+	open.ioMu.Unlock()
 
 	rsp := new(SetInfoResponse)
 	PrepareResponse(&rsp.PacketHeader, pkt, 0)
@@ -2421,9 +2488,9 @@ func (t *fileTree) setInfo(ctx *compoundContext, pkt []byte) error {
 		return t.setBasicInfo(ctx, fileId, open, pkt)
 	case FileEndOfFileInformation:
 		if open.isEa {
-			return t.setEndOfFileInfoEa(ctx, fileId, open.eaKey, pkt)
+			return t.setEndOfFileInfoEa(ctx, fileId, open, open.eaKey, pkt)
 		}
-		return t.setEndOfFileInfo(ctx, fileId, pkt)
+		return t.setEndOfFileInfo(ctx, fileId, open, pkt)
 	case FileDispositionInformation:
 		if open.isEa {
 			return t.setDispositionInfoEa(ctx, fileId, open.eaKey, pkt)

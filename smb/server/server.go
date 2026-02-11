@@ -87,6 +87,7 @@ type notifyEvent struct {
 }
 
 type Open struct {
+	ioMu                        sync.Mutex
 	fileId                      uint64
 	durableFileId               uint64
 	session                     *session
@@ -404,9 +405,12 @@ func (c *conn) negotiate(pkt []byte) error {
 
 	if c.serverState != STATE_NEGOTIATE {
 		if c.useSession() {
-			c.session = nil
-			c.resetSession()
-			c.serverState = STATE_NEGOTIATE
+			// Do not reset an active authenticated session because some Windows
+			// clients probe with extra negotiate/session traffic on the same TCP
+			// connection while file operations are in progress.
+			rsp := new(ErrorResponse)
+			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NETWORK_SESSION_EXPIRED))
+			return c.sendPacket(rsp, nil, nil)
 		}
 	}
 
@@ -417,9 +421,42 @@ func (c *conn) sessionSetup(pkt []byte) error {
 	log.Debugf("session setup")
 
 	if c.useSession() {
-		c.session = nil
-		c.resetSession()
-		c.serverState = STATE_NEGOTIATE
+		p := PacketCodec(pkt)
+		reqSid := p.SessionId()
+		curSid := c.session.sessionId
+
+		// Only acknowledge setup for the already-active session.
+		// Probes for sid=0 or a different sid must not be accepted as success,
+		// otherwise clients can treat handles from the real session as invalid.
+		if reqSid == curSid {
+			rsp := &SessionSetupResponse{
+				SessionFlags: c.session.sessionFlags,
+			}
+			rsp.Flags = 1
+			rsp.CreditRequestResponse = p.CreditRequest()
+			rsp.CreditCharge = 0
+			rsp.MessageId = p.MessageId()
+			rsp.SessionId = curSid
+			return c.sendPacket(rsp, nil, nil)
+		}
+
+		if reqSid == 0 {
+			log.Tracef("session setup probe on active connection: req sid=0 current sid=%d", curSid)
+			rsp := &SessionSetupResponse{
+				SessionFlags: c.session.sessionFlags,
+			}
+			rsp.Flags = 1
+			rsp.CreditRequestResponse = p.CreditRequest()
+			rsp.CreditCharge = 0
+			rsp.MessageId = p.MessageId()
+			rsp.SessionId = curSid
+			return c.sendPacket(rsp, nil, nil)
+		}
+
+		log.Tracef("session setup denied on active connection: req sid=%d current sid=%d", reqSid, curSid)
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
+		return c.sendPacket(rsp, nil, nil)
 	}
 
 	switch c.serverState {
@@ -850,7 +887,9 @@ func (c *conn) sessionServerSetup(pkt []byte) error {
 	res, err := accept(SMB2_SESSION_SETUP, pkt)
 	if err != nil {
 		log.Debugf("session setup decode failed: %v", err)
-		return err
+		rsp := new(ErrorResponse)
+		PrepareResponse(rsp.Header(), pkt, uint32(STATUS_INVALID_PARAMETER))
+		return c.sendPacket(rsp, nil, nil)
 	}
 
 	c.calcPreauthHash(pkt)
@@ -868,7 +907,9 @@ func (c *conn) sessionServerSetup(pkt []byte) error {
 	outputToken, err := c.serverCtx.negotiator.Spnego.challenge(r.SecurityBuffer())
 	if err != nil {
 		log.Warnf("session setup challenge failed: %v", err)
-		return &InvalidRequestError{err.Error()}
+		rsp := new(ErrorResponse)
+		PrepareResponse(rsp.Header(), pkt, uint32(STATUS_LOGON_FAILURE))
+		return c.sendPacket(rsp, nil, nil)
 	}
 
 	rsp := &SessionSetupResponse{
@@ -897,7 +938,9 @@ func (c *conn) sessionServerSetupChallenge(pkt []byte) error {
 
 	res, err := accept(SMB2_SESSION_SETUP, pkt)
 	if err != nil {
-		return err
+		rsp := new(ErrorResponse)
+		PrepareResponse(rsp.Header(), pkt, uint32(STATUS_INVALID_PARAMETER))
+		return c.sendPacket(rsp, nil, nil)
 	}
 
 	r := SessionSetupRequestDecoder(res)
@@ -915,8 +958,7 @@ func (c *conn) sessionServerSetupChallenge(pkt []byte) error {
 		log.Warnf("authentication failed: %v", err)
 		rsp := new(ErrorResponse)
 		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
-		c.sendPacket(rsp, nil, nil)
-		return &InvalidRequestError{err.Error()}
+		return c.sendPacket(rsp, nil, nil)
 	}
 
 	log.Infof("authenticated: %s", user)

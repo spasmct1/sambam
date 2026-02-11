@@ -130,6 +130,19 @@ func (i *FileAlternateNameInformationInfo) Encode(pkt []byte) {
 	utf16le.EncodeString(pkt[4:], i.FileName)
 }
 
+type FileNormalizedNameInformationInfo struct {
+	FileName string
+}
+
+func (i *FileNormalizedNameInformationInfo) Size() int {
+	return utf16le.EncodedStringLen(i.FileName) + 4
+}
+
+func (i *FileNormalizedNameInformationInfo) Encode(pkt []byte) {
+	le.PutUint32(pkt[:], uint32(utf16le.EncodedStringLen(i.FileName)))
+	utf16le.EncodeString(pkt[4:], i.FileName)
+}
+
 type FileAttributeTagInformationInfo struct {
 	FileAttributes uint32
 	ReparseTag     uint32
@@ -265,10 +278,6 @@ func (i *FileNetworkOpenInformationInfo) Encode(pkt []byte) {
 	le.PutUint64(pkt[32:], uint64(i.AllocationSize))
 	le.PutUint64(pkt[40:], uint64(i.EndOfFile))
 	le.PutUint32(pkt[48:], i.FileAttributes)
-}
-
-type FileNormalizedNameInformationInfo struct {
-	NormalizedName string
 }
 
 type FilePipeInformationInfo struct {

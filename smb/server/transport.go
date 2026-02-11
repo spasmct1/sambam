@@ -40,17 +40,15 @@ func (t *directTCP) Write(p []byte) (n int, err error) {
 
 	be.PutUint32(bs, uint32(len(p)))
 
-	_, err = t.conn.Write(bs)
-	if err != nil {
+	if err = writeAll(t.conn, bs); err != nil {
 		return -1, err
 	}
 
-	n, err = t.conn.Write(p)
-	if err != nil {
+	if err = writeAll(t.conn, p); err != nil {
 		return -1, err
 	}
 
-	return n + 4, nil
+	return len(p) + 4, nil
 }
 
 func (t *directTCP) ReadSize() (size int, err error) {
@@ -79,4 +77,18 @@ func (t *directTCP) Read(p []byte) (n int, err error) {
 
 func (t *directTCP) Close() error {
 	return t.conn.Close()
+}
+
+func writeAll(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+	}
+	return nil
 }

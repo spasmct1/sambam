@@ -203,12 +203,13 @@ func main() {
 		logrus.SetFormatter(&logFormatter{showLevel: true})
 	} else if *verbose > 0 {
 		logrus.SetLevel(logrus.InfoLevel)
-		logrus.SetFormatter(&logFormatter{showLevel: false})
+		logrus.SetFormatter(&logFormatter{showLevel: true})
 	} else {
 		logrus.SetLevel(logrus.ErrorLevel)
 	}
 
 	extraVerbose := *verbose >= 2
+	fullVerbose := *verbose >= 3
 
 	if *showHelp {
 		printUsage()
@@ -358,67 +359,46 @@ func main() {
 		// Setup filesystem callbacks for verbose mode
 		if *verbose > 0 {
 			fs.OnCreate = func(path string, isDir bool) {
-				timestamp := time.Now().Format("15:04:05")
 				typeStr := "file"
 				if isDir {
-					typeStr = "dir "
+					typeStr = "dir"
 				}
-				if *daemonMode {
-					log.Printf("create: %s %s", typeStr, path)
-				} else {
-					fmt.Printf("  %s %s %s %s\n", Dim(timestamp), Green("create:"), Dim(typeStr), path)
-				}
+				logrus.Infof("create: %s %s", typeStr, path)
 			}
 			fs.OnOverwrite = func(path string) {
-				timestamp := time.Now().Format("15:04:05")
-				if *daemonMode {
-					log.Printf("replace: %s", path)
-				} else {
-					fmt.Printf("  %s %s %s\n", Dim(timestamp), Yellow("replace:"), path)
-				}
+				logrus.Infof("replace: %s", path)
 			}
 			fs.OnDelete = func(path string) {
-				timestamp := time.Now().Format("15:04:05")
-				if *daemonMode {
-					log.Printf("delete: %s", path)
-				} else {
-					fmt.Printf("  %s %s %s\n", Dim(timestamp), Red("delete:"), path)
-				}
+				logrus.Infof("delete: %s", path)
 			}
 		}
 		if extraVerbose {
 			fs.OnOpen = func(path string, mode string) {
-				timestamp := time.Now().Format("15:04:05")
-				if *daemonMode {
-					log.Printf("open: %s (%s)", path, mode)
-				} else {
-					fmt.Printf("  %s %s %s %s\n", Dim(timestamp), Cyan("open:"), path, Dim("("+mode+")"))
-				}
+				path = normalizeLogPath(path)
+				logrus.Infof("open: %s (%s)", path, mode)
+			}
+			fs.OnDirRead = func(path string) {
+				path = normalizeLogPath(path)
+				logrus.Infof("dir read: %s", path)
 			}
 			fs.OnRead = func(path string) {
-				timestamp := time.Now().Format("15:04:05")
-				if *daemonMode {
-					log.Printf("read: %s", path)
-				} else {
-					fmt.Printf("  %s %s %s\n", Dim(timestamp), Cyan("read:"), path)
-				}
+				path = normalizeLogPath(path)
+				logrus.Infof("read: %s", path)
 			}
 			fs.OnClose = func(path string, mode string, readBytes uint64, writeBytes uint64) {
-				timestamp := time.Now().Format("15:04:05")
+				path = normalizeLogPath(path)
 				summary := fmt.Sprintf("r=%s w=%s", formatBytes(readBytes), formatBytes(writeBytes))
-				if *daemonMode {
-					log.Printf("close: %s (%s) %s", path, mode, summary)
-				} else {
-					fmt.Printf("  %s %s %s %s %s\n", Dim(timestamp), Cyan("close:"), path, Dim("("+mode+")"), Dim(summary))
-				}
+				logrus.Infof("close: %s (%s) %s", path, mode, summary)
 			}
 			fs.OnSlowOp = func(op string, path string, duration time.Duration, size int) {
-				timestamp := time.Now().Format("15:04:05")
-				if *daemonMode {
-					log.Printf("slow: %s %s took %s size=%d", op, path, duration.Round(time.Millisecond), size)
-				} else {
-					fmt.Printf("  %s %s %s %s %s\n", Dim(timestamp), Yellow("slow:"), op, path, Dim(duration.Round(time.Millisecond).String()))
-				}
+				path = normalizeLogPath(path)
+				logrus.Warnf("slow: %s %s took %s size=%d", op, path, duration.Round(time.Millisecond), size)
+			}
+		}
+		if fullVerbose {
+			fs.OnDirOpen = func(path string) {
+				path = normalizeLogPath(path)
+				logrus.Infof("dir open: %s", path)
 			}
 		}
 
@@ -438,54 +418,21 @@ func main() {
 	var onAuthFail func(string, string)
 	if *verbose > 0 {
 		onConnect = func(remoteAddr string) {
-			timestamp := time.Now().Format("15:04:05")
-			if *daemonMode {
-				log.Printf("connect: %s", remoteAddr)
-			} else {
-				fmt.Printf("  %s %s %s\n", Dim(timestamp), Green("connect:"), remoteAddr)
-			}
+			logrus.Infof("connect: %s", remoteAddr)
 		}
 		onRename = func(from, to string) {
-			timestamp := time.Now().Format("15:04:05")
-			if *daemonMode {
-				log.Printf("rename: %s -> %s", from, to)
-			} else {
-				fmt.Printf("  %s %s %s %s %s\n", Dim(timestamp), Cyan("rename:"), from, Dim("->"), to)
-			}
+			logrus.Infof("rename: %s -> %s", from, to)
 		}
 		onDetect = func(action, path string) {
-			timestamp := time.Now().Format("15:04:05")
-			var coloredAction string
-			switch action {
-			case "created":
-				coloredAction = Green("detected:") + " " + Green(action)
-			case "removed":
-				coloredAction = Red("detected:") + " " + Red(action)
-			case "modified":
-				coloredAction = Yellow("detected:") + " " + Yellow(action)
-			case "renamed":
-				coloredAction = Cyan("detected:") + " " + Cyan(action)
-			default:
-				coloredAction = "detected: " + action
-			}
-			if *daemonMode {
-				log.Printf("detected: %s %s", action, path)
-			} else {
-				fmt.Printf("  %s %s %s\n", Dim(timestamp), coloredAction, path)
-			}
+			logrus.Infof("detected: %s %s", action, path)
 		}
 	}
 	if extraVerbose {
 		onAuthFail = func(remoteAddr, username string) {
-			timestamp := time.Now().Format("15:04:05")
 			if username == "" {
 				username = "<unknown>"
 			}
-			if *daemonMode {
-				log.Printf("auth fail: %s user=%s", remoteAddr, username)
-			} else {
-				fmt.Printf("  %s %s %s %s\n", Dim(timestamp), Red("auth fail:"), remoteAddr, Dim("user="+username))
-			}
+			logrus.Warnf("auth fail: %s user=%s", remoteAddr, username)
 		}
 	}
 
@@ -651,6 +598,13 @@ func formatBytes(n uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func normalizeLogPath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	return path
 }
 
 func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []string, portSuffix string, username string, password string, expireStr string) {

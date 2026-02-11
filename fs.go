@@ -9,6 +9,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -16,19 +17,22 @@ import (
 )
 
 type OpenFile struct {
-	path       string
-	isDir      bool
-	f          *os.File
-	h          vfs.VfsHandle
-	dirPos     int
-	dirBuffer  []vfs.DirInfo
-	readOnce   sync.Once
-	mode       string
-	statsMu    sync.Mutex
-	readBytes  uint64
-	writeBytes uint64
-	hadRead    bool
-	hadWrite   bool
+	path        string
+	isDir       bool
+	f           *os.File
+	h           vfs.VfsHandle
+	dirPos      int
+	dirBuffer   []vfs.DirInfo
+	readOnce    sync.Once
+	dirReadOnce sync.Once
+	mode        string
+	statsMu     sync.Mutex
+	readBytes   uint64
+	writeBytes  uint64
+	hadRead     bool
+	hadWrite    bool
+	closing     uint32
+	ioWG        sync.WaitGroup
 }
 
 type PassthroughFS struct {
@@ -44,6 +48,8 @@ type PassthroughFS struct {
 	OnOpen      func(path string, mode string)
 	OnClose     func(path string, mode string, readBytes uint64, writeBytes uint64)
 	OnSlowOp    func(op string, path string, duration time.Duration, size int)
+	OnDirOpen   func(path string)
+	OnDirRead   func(path string)
 }
 
 func (fs *PassthroughFS) BasePath() string {
@@ -82,6 +88,11 @@ func (fs *PassthroughFS) GetAttr(handle vfs.VfsHandle) (*vfs.Attributes, error) 
 			return nil, fmt.Errorf("bad handle")
 		}
 		open := v.(*OpenFile)
+		if open.f != nil {
+			if info, err := open.f.Stat(); err == nil {
+				return fileInfoToAttr(info)
+			}
+		}
 		p = open.path
 	}
 
@@ -228,6 +239,8 @@ func (fs *PassthroughFS) Close(handle vfs.VfsHandle) error {
 		return fmt.Errorf("bad handle")
 	}
 	open := v.(*OpenFile)
+	atomic.StoreUint32(&open.closing, 1)
+	open.ioWG.Wait()
 
 	if open.f != nil {
 		open.f.Close()
@@ -298,10 +311,18 @@ func (fs *PassthroughFS) Read(handle vfs.VfsHandle, buf []byte, offset uint64, f
 
 	v, ok := fs.openFiles.Load(handle)
 	if !ok {
-		// Handle was closed - this can happen with parallel reads
-		return 0, io.EOF
+		return 0, fmt.Errorf("bad handle")
 	}
 	open := v.(*OpenFile)
+	if atomic.LoadUint32(&open.closing) != 0 {
+		return 0, fmt.Errorf("bad handle")
+	}
+	open.ioWG.Add(1)
+	if atomic.LoadUint32(&open.closing) != 0 {
+		open.ioWG.Done()
+		return 0, fmt.Errorf("bad handle")
+	}
+	defer open.ioWG.Done()
 
 	start := time.Now()
 	n, err := open.f.ReadAt(buf, int64(offset))
@@ -352,6 +373,15 @@ func (fs *PassthroughFS) Write(handle vfs.VfsHandle, buf []byte, offset uint64, 
 		return 0, fmt.Errorf("bad handle")
 	}
 	open := v.(*OpenFile)
+	if atomic.LoadUint32(&open.closing) != 0 {
+		return 0, fmt.Errorf("bad handle")
+	}
+	open.ioWG.Add(1)
+	if atomic.LoadUint32(&open.closing) != 0 {
+		open.ioWG.Done()
+		return 0, fmt.Errorf("bad handle")
+	}
+	defer open.ioWG.Done()
 
 	start := time.Now()
 	n, err := open.f.WriteAt(buf, int64(offset))
@@ -376,7 +406,11 @@ func (fs *PassthroughFS) OpenDir(p string) (vfs.VfsHandle, error) {
 	}
 
 	h := vfs.VfsHandle(randHandle())
-	fs.openFiles.Store(h, &OpenFile{f: f, h: h, path: fullPath, isDir: true})
+	fs.openFiles.Store(h, &OpenFile{f: f, h: h, path: fullPath, isDir: true, mode: "dir"})
+
+	if fs.OnDirOpen != nil {
+		fs.OnDirOpen(fs.relativePath(fullPath))
+	}
 
 	return h, nil
 }
@@ -391,6 +425,12 @@ func (fs *PassthroughFS) ReadDir(handle vfs.VfsHandle, pos int, maxEntries int) 
 		return nil, fmt.Errorf("bad handle")
 	}
 	open := v.(*OpenFile)
+
+	if open.isDir && fs.OnDirRead != nil {
+		open.dirReadOnce.Do(func() {
+			fs.OnDirRead(fs.relativePath(open.path))
+		})
+	}
 
 	var results []vfs.DirInfo
 	if pos != 0 {
@@ -520,7 +560,9 @@ func (fs *PassthroughFS) Truncate(handle vfs.VfsHandle, length uint64) error {
 		return fmt.Errorf("bad handle")
 	}
 	open := v.(*OpenFile)
-
+	if open.f != nil {
+		return open.f.Truncate(int64(length))
+	}
 	return os.Truncate(open.path, int64(length))
 }
 
@@ -545,7 +587,12 @@ func (fs *PassthroughFS) Rename(from vfs.VfsHandle, to string, flags int) error 
 		}
 	}
 
-	return os.Rename(open.path, path.Join(fs.rootPath, to))
+	newPath := path.Join(fs.rootPath, to)
+	if err := os.Rename(open.path, newPath); err != nil {
+		return err
+	}
+	open.path = newPath
+	return nil
 }
 
 func (fs *PassthroughFS) Symlink(targetHandle vfs.VfsHandle, target string, flag int) (*vfs.Attributes, error) {

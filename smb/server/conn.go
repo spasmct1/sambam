@@ -265,8 +265,12 @@ func (conn *conn) runReciever() {
 
 			p := PacketCodec(pkt)
 			if s := conn.session; s != nil {
-				if p.Command() != SMB2_NEGOTIATE && p.Command() != SMB2_SESSION_SETUP &&
+				if p.Command() != SMB2_NEGOTIATE &&
+					p.Command() != SMB2_SESSION_SETUP &&
 					p.Command() != SMB2_ECHO && s.sessionId != p.SessionId() {
+					// Never process payload commands for a different session id on this
+					// connection. Windows can send extra probes, but mixing them into the
+					// active session causes retries, delays and potential data corruption.
 					log.Tracef("skip: unknown session id (cmd %d, expected %d, got %d)", p.Command(), s.sessionId, p.SessionId())
 					continue
 				}
@@ -526,6 +530,17 @@ func (conn *conn) sendPacket(req Packet, tc *treeConn, compCtx *compoundContext)
 	if err != nil {
 		conn.m.Unlock()
 		return err
+	}
+	if p := PacketCodec(pkt); !p.IsInvalid() && p.Status() != 0 {
+		log.Tracef(
+			"rsp err: cmd=%d status=0x%08x (%s) mid=%d sid=%d tid=%d",
+			p.Command(),
+			p.Status(),
+			NtStatus(p.Status()).Error(),
+			p.MessageId(),
+			p.SessionId(),
+			p.TreeId(),
+		)
 	}
 
 	if compCtx != nil {

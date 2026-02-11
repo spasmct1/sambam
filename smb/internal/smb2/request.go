@@ -1009,7 +1009,16 @@ func (r WriteRequestDecoder) Flags() uint32 {
 }
 
 func (r WriteRequestDecoder) Data() []byte {
-	return r[48 : 48+r.Length()]
+	off := r.DataOffset()
+	if off < 64 {
+		return nil
+	}
+	off -= 64
+	end := uint32(off) + r.Length()
+	if int(end) > len(r) {
+		return nil
+	}
+	return r[off:end]
 }
 
 // ----------------------------------------------------------------------------
