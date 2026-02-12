@@ -257,6 +257,7 @@ func (d *Server) Serve(addr string) error {
 		conn := &conn{
 			t:                   direct(c),
 			remoteAddr:          c.RemoteAddr().String(),
+			sessions:            make(map[uint64]*session),
 			outstandingRequests: newOutstandingRequests(),
 			account:             a,
 			rdone:               make(chan struct{}, 1),
@@ -322,6 +323,22 @@ func (c *conn) Run() error {
 			log.Tracef("Async command received")
 		}
 
+		// Route this request to the matching session for signing/encryption
+		// and tree/session authorization checks.
+		switch p.Command() {
+		case SMB2_NEGOTIATE, SMB_COM_NEGOTIATE, SMB2_SESSION_SETUP, SMB2_ECHO:
+			// no-op
+		default:
+			if c.useSession() {
+				if c.setActiveSession(p.SessionId()) == nil {
+					rsp := new(ErrorResponse)
+					PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_USER_SESSION_DELETED))
+					c.sendPacket(rsp, nil, compCtx)
+					continue
+				}
+			}
+		}
+
 		switch p.Command() {
 		case SMB2_NEGOTIATE, SMB_COM_NEGOTIATE:
 			err = c.negotiate(pkt)
@@ -339,8 +356,10 @@ func (c *conn) Run() error {
 			p := PacketCodec(pkt)
 			tc, ok := c.treeMapById[p.TreeId()]
 			if !ok {
-				err = &InvalidRequestError{fmt.Sprintf("tree %d doesn't exist: command %d", p.TreeId(), p.Command())}
-				break
+				rsp := new(ErrorResponse)
+				PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NETWORK_NAME_DELETED))
+				c.sendPacket(rsp, nil, compCtx)
+				continue
 			}
 
 			// if prev transaction req failed, don't forward it
@@ -378,6 +397,11 @@ func (c *conn) Run() error {
 				err = tc.setInfo(compCtx, pkt)
 			case SMB2_OPLOCK_BREAK:
 				err = tc.oplockBreak(compCtx, pkt)
+			default:
+				rsp := new(ErrorResponse)
+				PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+				c.sendPacket(rsp, tc.getTree(), compCtx)
+				continue
 			}
 		}
 		if err != nil {
@@ -423,40 +447,49 @@ func (c *conn) sessionSetup(pkt []byte) error {
 	if c.useSession() {
 		p := PacketCodec(pkt)
 		reqSid := p.SessionId()
-		curSid := c.session.sessionId
+		cur := c.session
 
-		// Only acknowledge setup for the already-active session.
-		// Probes for sid=0 or a different sid must not be accepted as success,
-		// otherwise clients can treat handles from the real session as invalid.
-		if reqSid == curSid {
+		// Only acknowledge setup for the already-active session id.
+		// Requests for sid=0 or a different sid on this connection must fail;
+		// returning success can make Windows switch session context and treat
+		// existing handles as invalid.
+		if reqSid != 0 {
+			s := c.getSession(reqSid)
+			if s == nil {
+				log.Tracef("session setup denied on active connection: unknown req sid=%d", reqSid)
+				rsp := new(ErrorResponse)
+				PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
+				return c.sendPacket(rsp, nil, nil)
+			}
+
+			c.setActiveSession(reqSid)
 			rsp := &SessionSetupResponse{
-				SessionFlags: c.session.sessionFlags,
+				SessionFlags: s.sessionFlags,
 			}
 			rsp.Flags = 1
 			rsp.CreditRequestResponse = p.CreditRequest()
 			rsp.CreditCharge = 0
 			rsp.MessageId = p.MessageId()
-			rsp.SessionId = curSid
+			rsp.SessionId = s.sessionId
 			return c.sendPacket(rsp, nil, nil)
 		}
 
-		if reqSid == 0 {
-			log.Tracef("session setup probe on active connection: req sid=0 current sid=%d", curSid)
+		if cur != nil {
+			// Windows sometimes probes with sid=0 on an active connection.
+			// Acknowledge with the current session to avoid auth prompts.
+			log.Tracef("session setup probe on active connection: req sid=0 current sid=%d", cur.sessionId)
 			rsp := &SessionSetupResponse{
-				SessionFlags: c.session.sessionFlags,
+				SessionFlags: cur.sessionFlags,
 			}
 			rsp.Flags = 1
 			rsp.CreditRequestResponse = p.CreditRequest()
 			rsp.CreditCharge = 0
 			rsp.MessageId = p.MessageId()
-			rsp.SessionId = curSid
+			rsp.SessionId = cur.sessionId
 			return c.sendPacket(rsp, nil, nil)
 		}
 
-		log.Tracef("session setup denied on active connection: req sid=%d current sid=%d", reqSid, curSid)
-		rsp := new(ErrorResponse)
-		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
-		return c.sendPacket(rsp, nil, nil)
+		// sid=0 and no active session selected: continue with normal setup flow.
 	}
 
 	switch c.serverState {
@@ -1080,7 +1113,7 @@ func (c *conn) sessionServerSetupChallenge(pkt []byte) error {
 
 	// We set session before sending packet just for setting hdr.SessionId.
 	// But, we should not permit access from receiver until the session information is completed.
-	c.session = s
+	c.setSession(s)
 
 	c.serverState = STATE_SESSION_ACTIVE
 	if err = c.sendPacket(rsp, nil, nil); err == nil {

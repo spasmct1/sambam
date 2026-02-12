@@ -197,7 +197,7 @@ func (t *ipcTree) ipcTreeReq(ctx *compoundContext, pkt []byte) (Encoder, error) 
 		infoReq := NetShareGetInfoRequestDecoder(req.Data())
 		data = MakeGetInfoShareResponse(infoReq.ShareName())
 	default:
-		return nil, &InvalidRequestError{"unsupported opnum in rpc request"}
+		return nil, &RequestError{Code: uint32(STATUS_NOT_SUPPORTED)}
 	}
 
 	rpc := new(DCERequestRes)
@@ -219,6 +219,14 @@ func (t *ipcTree) ioctl(ctx *compoundContext, pkt []byte) error {
 	if r.IsInvalid() {
 		return &InvalidRequestError{"broken ioctl request"}
 	}
+	log.Tracef("ipc ioctl req: code=0x%x fileId=%v inLen=%d outLen=%d maxOut=%d flags=0x%x",
+		r.CtlCode(),
+		r.FileId().Decode(),
+		r.InputCount(),
+		r.OutputCount(),
+		r.MaxOutputResponse(),
+		r.Flags(),
+	)
 
 	switch r.CtlCode() {
 	case FSCTL_PIPE_TRANSCEIVE:
@@ -228,12 +236,16 @@ func (t *ipcTree) ioctl(ctx *compoundContext, pkt []byte) error {
 		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_FS_DRIVER_REQUIRED))
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	default:
-		return &InvalidRequestError{"cannot handle ctl code"}
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
 	if !reflect.DeepEqual(r.FileId().Persistent(), SRVSVC_GUID.Persistent[:]) ||
 		!reflect.DeepEqual(r.FileId().Volatile(), SRVSVC_GUID.Volatile[:]) {
-		return &InvalidRequestError{"srvsvc uuid doesn't match"}
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
 	var rpc Encoder
@@ -245,12 +257,20 @@ func (t *ipcTree) ioctl(ctx *compoundContext, pkt []byte) error {
 	case PacketTypeBind:
 		rpc, err = t.ipcTreeBindReq(ctx, r.Data())
 	default:
-		return &InvalidRequestError{"unsupported packet type"}
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
 	if err != nil {
 		rsp := new(ErrorResponse)
-		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
+		status := uint32(STATUS_ACCESS_DENIED)
+		if re, ok := err.(*RequestError); ok {
+			status = re.Code
+		} else if _, ok := err.(*InvalidRequestError); ok {
+			status = uint32(STATUS_NOT_SUPPORTED)
+		}
+		PrepareResponse(&rsp.PacketHeader, pkt, status)
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
@@ -265,32 +285,183 @@ func (t *ipcTree) ioctl(ctx *compoundContext, pkt []byte) error {
 }
 
 func (t *ipcTree) cancel(ctx *compoundContext, pkt []byte) error {
-	return &InvalidRequestError{"invalid cancel request for ipcTree"}
+	rsp := new(ErrorResponse)
+	PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+	return t.session.conn.sendPacket(rsp, &t.treeConn, ctx)
 }
 
 func (t *ipcTree) queryDirectory(ctx *compoundContext, pkt []byte) error {
-	return &InvalidRequestError{"invalid queryDirectory request for ipcTree"}
+	rsp := new(ErrorResponse)
+	PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+	return t.session.conn.sendPacket(rsp, &t.treeConn, ctx)
 }
 
 func (t *ipcTree) changeNotify(ctx *compoundContext, pkt []byte) error {
-	return &InvalidRequestError{"invalid changeNotify request for ipcTree"}
+	rsp := new(ErrorResponse)
+	PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+	return t.session.conn.sendPacket(rsp, &t.treeConn, ctx)
 }
 
 func (t *ipcTree) queryInfo(ctx *compoundContext, pkt []byte) error {
 	c := t.session.conn
-	rsp := new(ErrorResponse)
-	PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+
+	res, err := accept(SMB2_QUERY_INFO, pkt)
+	if err != nil {
+		return err
+	}
+
+	r := QueryInfoRequestDecoder(res)
+	if r.IsInvalid() {
+		return &InvalidRequestError{"broken query info request for ipcTree"}
+	}
+
+	fileId := r.FileId().Decode()
+	if fileId == nil || !reflect.DeepEqual(fileId.Persistent[:], SRVSVC_GUID.Persistent[:]) ||
+		!reflect.DeepEqual(fileId.Volatile[:], SRVSVC_GUID.Volatile[:]) {
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INVALID_HANDLE))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
+
+	if r.InfoType() != INFO_FILE && r.InfoType() != INFO_SECURITY {
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
+
+	if r.InfoType() == INFO_SECURITY {
+		// Minimal security descriptor for named pipe srvsvc.
+		ai := r.AdditionalInformation()
+		sd := SecurityDescriptor{}
+		if ai&OWNER_SECURITY_INFORMATION != 0 {
+			sd.OwnerSid = &SID{IdentifierAuthority: SECURITY_NT_AUTHORITY, SubAuthority: []uint32{18}} // LOCAL_SYSTEM
+		}
+		if ai&GROUP_SECUIRTY_INFORMATION != 0 {
+			sd.GroupSid = &SID{IdentifierAuthority: SECURITY_NT_AUTHORITY, SubAuthority: []uint32{18}} // LOCAL_SYSTEM
+		}
+		if ai&SACL_SECUIRTY_INFORMATION != 0 {
+			sd.Sacl = &ACL{}
+		}
+		if ai&DACL_SECUIRTY_INFORMATION != 0 {
+			sd.Dacl = &ACL{
+				ACE{
+					Sid:  &SID{IdentifierAuthority: WORLD_SID_AUTHORITY, SubAuthority: []uint32{0}}, // Everyone
+					Type: ACCESS_ALLOWED_ACE_TYPE,
+					Mask: GENERIC_ALL,
+				},
+			}
+		}
+
+		if need := sd.Size(); need > int(r.OutputBufferLength()) {
+			rsp := new(ErrorResponse)
+			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_BUFFER_TOO_SMALL))
+			rsp.ErrorData = &SmallBufferErrorResponse{RequiredBufferLength: uint32(need)}
+			return c.sendPacket(rsp, &t.treeConn, ctx)
+		}
+
+		rsp := new(QueryInfoResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, 0)
+		rsp.Output = &sd
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
+
+	var info Encoder
+	switch r.FileInfoClass() {
+	case FileBasicInformation:
+		info = &FileBasicInformationInfo{
+			CreationTime:   Filetime{},
+			LastAccessTime: Filetime{},
+			LastWriteTime:  Filetime{},
+			ChangeTime:     Filetime{},
+			FileAttributes: FILE_ATTRIBUTE_NORMAL,
+		}
+	case FileStandardInformation:
+		info = &FileStandardInformationInfo{
+			EndOfFile:      0,
+			AllocationSize: 0,
+			NumberOfLinks:  1,
+			Directory:      0,
+		}
+	case FileInternalInformation:
+		info = &FileInternalInformationInfo{IndexNumber: 0}
+	case FileEaInformation:
+		info = &FileEaInformationInfo{}
+	case FileNetworkOpenInformation:
+		info = &FileNetworkOpenInformationInfo{
+			CreationTime:   Filetime{},
+			LastAccessTime: Filetime{},
+			LastWriteTime:  Filetime{},
+			ChangeTime:     Filetime{},
+			AllocationSize: 0,
+			EndOfFile:      0,
+			FileAttributes: FILE_ATTRIBUTE_NORMAL,
+		}
+	case FileAllInformation:
+		info = &FileAllInformationInfo{
+			BasicInformation: FileBasicInformationInfo{
+				CreationTime:   Filetime{},
+				LastAccessTime: Filetime{},
+				LastWriteTime:  Filetime{},
+				ChangeTime:     Filetime{},
+				FileAttributes: FILE_ATTRIBUTE_NORMAL,
+			},
+			StandardInformation: FileStandardInformationInfo{
+				EndOfFile:      0,
+				AllocationSize: 0,
+				NumberOfLinks:  1,
+				Directory:      0,
+			},
+			Internal: FileInternalInformationInfo{
+				IndexNumber: 0,
+			},
+			EaInformation: FileEaInformationInfo{},
+			AccessInformation: FileAccessInformationInfo{
+				AccessFlags: GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+			},
+			PositionInformation: FilePositionInformationInfo{},
+			ModeInformation: FileModeInformationInfo{
+				Mode: FILE_SYNCHRONOUS_IO_ALERT,
+			},
+			AlignmentInformation: FileAlignmentInformationInfo{},
+			NameInformation: FileAlternateNameInformationInfo{
+				FileName: "srvsvc",
+			},
+		}
+	default:
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INVALID_INFO_CLASS))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
+
+	if info != nil {
+		need := info.Size()
+		if need > int(r.OutputBufferLength()) {
+			rsp := new(ErrorResponse)
+			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INFO_LENGTH_MISMATCH))
+			return c.sendPacket(rsp, &t.treeConn, ctx)
+		}
+	}
+
+	rsp := new(QueryInfoResponse)
+	PrepareResponse(&rsp.PacketHeader, pkt, 0)
+	rsp.Output = info
 	return c.sendPacket(rsp, &t.treeConn, ctx)
 }
 
 func (t *ipcTree) setInfo(ctx *compoundContext, pkt []byte) error {
-	return &InvalidRequestError{"invalid setInfo request for ipcTree"}
+	rsp := new(ErrorResponse)
+	PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+	return t.session.conn.sendPacket(rsp, &t.treeConn, ctx)
 }
 
 func (t *ipcTree) lock(ctx *compoundContext, pkt []byte) error {
-	return &InvalidRequestError{"invalid lock request for ipcTree"}
+	rsp := new(ErrorResponse)
+	PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+	return t.session.conn.sendPacket(rsp, &t.treeConn, ctx)
 }
 
 func (t *ipcTree) oplockBreak(ctx *compoundContext, pkt []byte) error {
-	return &InvalidRequestError{"invalid oplockBreak request for ipcTree"}
+	rsp := new(ErrorResponse)
+	PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+	return t.session.conn.sendPacket(rsp, &t.treeConn, ctx)
 }

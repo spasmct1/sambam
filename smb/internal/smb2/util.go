@@ -226,6 +226,11 @@ func MaxAccessFromVfs(a *vfs.Attributes) uint32 {
 	if unixMode&0101 != 0 {
 		maximalAccess |= FILE_EXECUTE
 	}
+	// Windows treats execute as a read-capability for regular files on SMB shares.
+	// If the file is readable, allow FILE_EXECUTE even if the unix exec bit is unset.
+	if unixMode&0444 != 0 {
+		maximalAccess |= FILE_EXECUTE
+	}
 	return maximalAccess
 }
 

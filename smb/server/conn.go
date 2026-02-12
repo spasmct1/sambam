@@ -100,6 +100,7 @@ type conn struct {
 	remoteAddr string
 
 	session                   *session
+	sessions                  map[uint64]*session
 	outstandingRequests       *outstandingRequests
 	sequenceWindow            uint64
 	dialect                   uint16
@@ -138,6 +139,27 @@ type conn struct {
 
 	treeMapByName map[string]treeOps
 	treeMapById   map[uint32]treeOps
+}
+
+func (conn *conn) getSession(sessionId uint64) *session {
+	conn.m.Lock()
+	defer conn.m.Unlock()
+	return conn.sessions[sessionId]
+}
+
+func (conn *conn) setSession(s *session) {
+	conn.m.Lock()
+	defer conn.m.Unlock()
+	conn.sessions[s.sessionId] = s
+	conn.session = s
+}
+
+func (conn *conn) setActiveSession(sessionId uint64) *session {
+	conn.m.Lock()
+	defer conn.m.Unlock()
+	s := conn.sessions[sessionId]
+	conn.session = s
+	return s
 }
 
 func (conn *conn) shutdown() {
@@ -264,21 +286,18 @@ func (conn *conn) runReciever() {
 			}
 
 			p := PacketCodec(pkt)
-			if s := conn.session; s != nil {
-				if p.Command() != SMB2_NEGOTIATE &&
-					p.Command() != SMB2_SESSION_SETUP &&
-					p.Command() != SMB2_ECHO && s.sessionId != p.SessionId() {
-					// Never process payload commands for a different session id on this
-					// connection. Windows can send extra probes, but mixing them into the
-					// active session causes retries, delays and potential data corruption.
-					log.Tracef("skip: unknown session id (cmd %d, expected %d, got %d)", p.Command(), s.sessionId, p.SessionId())
+			if p.Command() != SMB2_NEGOTIATE &&
+				p.Command() != SMB2_SESSION_SETUP &&
+				p.Command() != SMB2_ECHO {
+				s := conn.getSession(p.SessionId())
+				if s == nil {
+					log.Tracef("skip: unknown session id (cmd %d, sid %d)", p.Command(), p.SessionId())
 					continue
 				}
 
 				if tc, ok := s.treeConnTables[p.TreeId()]; ok {
 					if tc.treeId != p.TreeId() {
 						log.Warningln("skip:", &InvalidResponseError{"unknown tree id"})
-
 						continue
 					}
 				}
@@ -293,6 +312,17 @@ func (conn *conn) runReciever() {
 			if p.IsInvalid() {
 				err = &InvalidRequestError{}
 				goto exit
+			}
+			if log.IsLevelEnabled(log.TraceLevel) {
+				log.Tracef(
+					"req: cmd=%d mid=%d sid=%d tid=%d flags=0x%x len=%d",
+					p.Command(),
+					p.MessageId(),
+					p.SessionId(),
+					p.TreeId(),
+					p.Flags(),
+					len(pkt),
+				)
 			}
 
 			if p.IsCompoundFirst() {
@@ -449,11 +479,12 @@ func (conn *conn) tryDecrypt(pkt []byte) ([]byte, error, bool) {
 			return nil, &InvalidResponseError{"encrypted flag is not on"}, false
 		}
 
-		if conn.session == nil || conn.session.sessionId != t.SessionId() {
+		s := conn.getSession(t.SessionId())
+		if s == nil {
 			return nil, &InvalidResponseError{"unknown session id returned"}, false
 		}
 
-		pkt, err := conn.session.decrypt(pkt)
+		pkt, err := s.decrypt(pkt)
 		if err != nil {
 			return nil, &InvalidResponseError{err.Error()}, false
 		}
@@ -471,21 +502,18 @@ func (conn *conn) tryVerify(pkt []byte, isEncrypted bool) error {
 
 	if msgId != 0xFFFFFFFFFFFFFFFF {
 		if p.Flags()&SMB2_FLAGS_SIGNED != 0 {
-			if conn.session == nil || conn.session.sessionId != p.SessionId() {
+			s := conn.getSession(p.SessionId())
+			if s == nil {
 				return &InvalidResponseError{"unknown session id returned"}
-			} else {
-				if !conn.session.verify(pkt) {
-					return &InvalidResponseError{"unverified packet returned"}
-				}
+			}
+			if !s.verify(pkt) {
+				return &InvalidResponseError{"unverified packet returned"}
 			}
 		} else {
 			if conn.requireSigning && !isEncrypted {
-				if conn.session != nil {
-					if conn.session.sessionFlags&(SMB2_SESSION_FLAG_IS_GUEST|SMB2_SESSION_FLAG_IS_NULL) == 0 {
-						if conn.session.sessionId == p.SessionId() {
-							return &InvalidResponseError{"signing required"}
-						}
-					}
+				s := conn.getSession(p.SessionId())
+				if s != nil && s.sessionFlags&(SMB2_SESSION_FLAG_IS_GUEST|SMB2_SESSION_FLAG_IS_NULL) == 0 {
+					return &InvalidResponseError{"signing required"}
 				}
 			}
 		}
@@ -537,6 +565,15 @@ func (conn *conn) sendPacket(req Packet, tc *treeConn, compCtx *compoundContext)
 			p.Command(),
 			p.Status(),
 			NtStatus(p.Status()).Error(),
+			p.MessageId(),
+			p.SessionId(),
+			p.TreeId(),
+		)
+	} else if log.IsLevelEnabled(log.TraceLevel) {
+		log.Tracef(
+			"rsp: cmd=%d status=0x%08x mid=%d sid=%d tid=%d",
+			p.Command(),
+			p.Status(),
 			p.MessageId(),
 			p.SessionId(),
 			p.TreeId(),

@@ -1,6 +1,7 @@
 package smb2
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -73,6 +74,17 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 	if r.IsInvalid() {
 		return &InvalidRequestError{"broken create format"}
 	}
+	log.Tracef(
+		"create req: name=%q access=0x%x share=0x%x opts=0x%x disp=%d attrs=0x%x oplock=%d imp=%d",
+		r.Name(),
+		r.DesiredAccess(),
+		r.ShareAccess(),
+		r.CreateOptions(),
+		r.CreateDisposition(),
+		r.FileAttributes(),
+		r.RequestedOplockLevel(),
+		r.ImpersonationLevel(),
+	)
 
 	log.Tracef("create name: %s, options %d, disp %d", r.Name(), r.CreateOptions(), r.CreateDisposition())
 
@@ -197,7 +209,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		flags |= O_EXLOCK
 		lockState = LOCKSTATE_HELD
 	case SMB2_OPLOCK_LEVEL_LEASE:
-		// We don't support leases - downgrade to no oplock
+		// We'll decide based on whether we return a lease context.
 		lockLevel = SMB2_OPLOCK_LEVEL_NONE
 	default:
 		lockLevel = 0
@@ -256,7 +268,6 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 	rsp.FileId.SetHandleId(uint64(h))
 	rsp.FileId.SetNodeId(node)
 
-	rsp.OplockLevel = lockLevel
 	rsp.CreateAction = uint32(action)
 	rsp.FileAttributes = PermissionsFromVfs(attrs, name, t.conn.serverCtx.hideDotfiles)
 	rsp.CreationTime = BirthTimeFromVfs(attrs)
@@ -297,7 +308,7 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		log.Tracef("create context: name=%q len=%d", ccName, len(ccName))
 		switch ccName {
 		case "MxAc":
-			if enc, err := t.handleMaxAccessCC(attrs); err == nil {
+			if enc, err := t.handleMaxAccessCC(attrs); err == nil && enc != nil {
 				rsp.Contexts = append(rsp.Contexts, enc)
 			}
 		case "AAPL":
@@ -306,12 +317,16 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 				rsp.Contexts = append(rsp.Contexts, enc)
 			}
 		case "DH2Q":
-			if enc, err := t.handleDH2Q(res.Buffer(), open); err == nil {
+			if enc, err := t.handleDH2Q(res.Buffer(), open); err == nil && enc != nil {
 				rsp.Contexts = append(rsp.Contexts, enc)
 			}
 		case "RqLs":
-			if enc, err := t.handleRqLs(res.Buffer(), open); err == nil {
+			if enc, err := t.handleRqLs(res.Buffer(), open); err == nil && enc != nil {
 				rsp.Contexts = append(rsp.Contexts, enc)
+				// If we reply with a lease, mark oplock as LEASE.
+				if r.RequestedOplockLevel() == SMB2_OPLOCK_LEVEL_LEASE {
+					lockLevel = SMB2_OPLOCK_LEVEL_LEASE
+				}
 			}
 		case "QFid":
 			if enc, err := t.handleQFid(res.Buffer(), open); err == nil {
@@ -333,11 +348,33 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		}
 	}
 
+	// Ensure the response reflects the final oplock decision.
+	rsp.OplockLevel = lockLevel
+
 	if ctx != nil {
 		ctx.fileId = rsp.FileId
 	}
 
 	t.conn.serverCtx.addOpen(open)
+
+	if log.IsLevelEnabled(log.TraceLevel) {
+		if len(rsp.Contexts) == 0 {
+			log.Tracef("create rsp: oplock=%d ctxs=0 ctxLen=0", rsp.OplockLevel)
+		} else {
+			ctxLen := 0
+			off := 88
+			names := make([]string, 0, len(rsp.Contexts))
+			for _, cc := range rsp.Contexts {
+				off = Roundup(off, 8)
+				ctxLen = off - 88 + cc.Size()
+				off += cc.Size()
+				if cctx, ok := cc.(*CreateContext); ok {
+					names = append(names, cctx.Name)
+				}
+			}
+			log.Tracef("create rsp: oplock=%d ctxs=%d ctxLen=%d names=%v", rsp.OplockLevel, len(rsp.Contexts), ctxLen, names)
+		}
+	}
 
 	err = c.sendPacket(rsp, &t.treeConn, ctx)
 
@@ -367,6 +404,9 @@ func (t *fileTree) handleQFid(pkt []byte, open *Open) (Encoder, error) {
 }
 
 func (t *fileTree) handleDH2Q(pkt []byte, open *Open) (Encoder, error) {
+	// Disable durable handles: we don't implement durable reconnect semantics.
+	return nil, nil
+
 	r := DurableHandleRequest2Decoder(pkt)
 	timeout := r.Timeout()
 	if timeout == 0 {
@@ -388,9 +428,10 @@ func (t *fileTree) handleDH2Q(pkt []byte, open *Open) (Encoder, error) {
 }
 
 func (t *fileTree) handleRqLs(pkt []byte, open *Open) (Encoder, error) {
-	// We don't support leases - don't include a lease context in the response.
-	// The client will see OplockLevel=NONE and fall back to no caching.
-	return nil, fmt.Errorf("leases not supported")
+	// Disable leases: do not return RqLs response context.
+	// Some Windows clients behave poorly if the server doesn't fully
+	// implement lease semantics.
+	return nil, nil
 }
 
 func (t *fileTree) handleCreateEA(disp uint32, h vfs.VfsHandle, eaKey string) (uint32, error) {
@@ -411,9 +452,13 @@ func (t *fileTree) handleCreateEA(disp uint32, h vfs.VfsHandle, eaKey string) (u
 			}
 		}
 	case FILE_OPEN:
-		// open exisiting
+		// open existing; if missing, create empty ADS to satisfy Windows probes
 		if _, err = t.fs.Getxattr(h, eaKey, nil); err != nil {
-			status = uint32(STATUS_OBJECT_NAME_NOT_FOUND)
+			if err = t.fs.Setxattr(h, eaKey, nil); err != nil {
+				status = uint32(STATUS_OBJECT_NAME_NOT_FOUND)
+			} else {
+				err = nil
+			}
 		}
 	case FILE_CREATE:
 		// if exists fail, otherwise create
@@ -703,6 +748,12 @@ func (t *fileTree) read(ctx *compoundContext, pkt []byte) error {
 
 	res, _ := accept(SMB2_READ, pkt)
 	r := ReadRequestDecoder(res)
+	if r.Channel() != 0 || r.ReadChannelInfoLength() != 0 {
+		log.Tracef("read: unsupported channel=%d chanInfoLen=%d", r.Channel(), r.ReadChannelInfoLength())
+		rsp := new(ErrorResponse)
+		PrepareResponse(rsp.Header(), pkt, uint32(STATUS_NOT_SUPPORTED))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
 
 	fileId := r.FileId().Decode()
 	if ctx != nil && ctx.fileId != nil {
@@ -735,6 +786,12 @@ func (t *fileTree) readImpl(ctx *compoundContext, pkt []byte, fileId *FileId, op
 
 	res, _ := accept(SMB2_READ, pkt)
 	r := ReadRequestDecoder(res)
+	if r.Channel() != 0 || r.ReadChannelInfoLength() != 0 {
+		log.Tracef("readImpl: unsupported channel=%d chanInfoLen=%d", r.Channel(), r.ReadChannelInfoLength())
+		rsp := new(ErrorResponse)
+		PrepareAsyncResponse(rsp.Header(), pkt, asyncId, uint32(STATUS_NOT_SUPPORTED))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
 	log.Tracef("read req: file=%s off=%d len=%d min=%d flags=0x%x", open.pathName, r.Offset(), r.Length(), r.MinimumCount(), r.Flags())
 
 	buf := make([]byte, r.Length())
@@ -1044,6 +1101,14 @@ func (t *fileTree) ioctl(ctx *compoundContext, pkt []byte) error {
 
 	res, _ := accept(SMB2_IOCTL, pkt)
 	r := IoctlRequestDecoder(res)
+	log.Tracef("ioctl req: code=0x%x fileId=%d inLen=%d outLen=%d maxOut=%d flags=0x%x",
+		r.CtlCode(),
+		r.FileId().Decode().HandleId(),
+		r.InputCount(),
+		r.OutputCount(),
+		r.MaxOutputResponse(),
+		r.Flags(),
+	)
 
 	switch r.CtlCode() {
 	case FSCTL_SET_REPARSE_POINT:
@@ -1729,6 +1794,15 @@ func (t *fileTree) queryInfoFileSystem(ctx *compoundContext, pkt []byte) error {
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
+	if info != nil {
+		need := info.Size()
+		if need > int(r.OutputBufferLength()) {
+			rsp := new(ErrorResponse)
+			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INFO_LENGTH_MISMATCH))
+			return c.sendPacket(rsp, &t.treeConn, ctx)
+		}
+	}
+
 	rsp := new(QueryInfoResponse)
 	PrepareResponse(&rsp.PacketHeader, pkt, 0)
 	rsp.Output = info
@@ -1742,7 +1816,7 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 	res, _ := accept(SMB2_QUERY_INFO, pkt)
 	r := QueryInfoRequestDecoder(res)
 
-	log.Tracef("queryInfoFile: class %d", r.FileInfoClass())
+	log.Tracef("queryInfoFile: class %d outLen=%d", r.FileInfoClass(), r.OutputBufferLength())
 
 	fileId := r.FileId().Decode()
 	if ctx != nil && ctx.fileId != nil {
@@ -1867,8 +1941,12 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 			}
 		}
 	case FileNormalizedNameInformation:
+		norm := strings.ReplaceAll(name, "/", "\\")
+		if !strings.HasPrefix(norm, "\\") {
+			norm = "\\" + norm
+		}
 		info = &FileNormalizedNameInformationInfo{
-			FileName: strings.ReplaceAll(name, "/", "\\"),
+			FileName: norm,
 		}
 	case FileInternalInformation:
 		info = &FileInternalInformationInfo{
@@ -1922,6 +2000,15 @@ func (t *fileTree) queryInfoFile(ctx *compoundContext, pkt []byte) error {
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
+	if info != nil {
+		need := info.Size()
+		if need > int(r.OutputBufferLength()) {
+			rsp := new(ErrorResponse)
+			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INFO_LENGTH_MISMATCH))
+			return c.sendPacket(rsp, &t.treeConn, ctx)
+		}
+	}
+
 	rsp := new(QueryInfoResponse)
 	PrepareResponse(&rsp.PacketHeader, pkt, 0)
 	rsp.Output = info
@@ -1939,77 +2026,51 @@ func (t *fileTree) queryInfoSec(ctx *compoundContext, pkt []byte) error {
 	if ctx != nil && ctx.fileId != nil {
 		fileId = ctx.fileId
 	}
-
 	if IsInvalidFileId(fileId) {
-		log.Errorf("queryInfoSec: invalid fileid")
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INVALID_HANDLE))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
+	if t.conn.serverCtx.getOpen(fileId.HandleId()) == nil {
 		rsp := new(ErrorResponse)
 		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INVALID_HANDLE))
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
-	attrs, err := t.fs.GetAttr(vfs.VfsHandle(fileId.HandleId()))
-	if err != nil {
-		log.Errorf("queryInfoSec: GetAttr() failed")
-		rsp := new(ErrorResponse)
-		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INVALID_HANDLE))
-		return c.sendPacket(rsp, &t.treeConn, ctx)
-	}
-
+	log.Tracef("queryInfoSec: addInfo=0x%x outLen=%d", r.AdditionalInformation(), r.OutputBufferLength())
+	// Build a minimal valid self-relative descriptor for requested fields.
+	ai := r.AdditionalInformation()
 	sd := SecurityDescriptor{}
-	if r.AdditionalInformation()&OWNER_SECURITY_INFORMATION != 0 {
-		uid, _ := attrs.GetUID()
-		sd.OwnerSid = SIDFromUid(uid)
+	if ai&OWNER_SECURITY_INFORMATION != 0 {
+		sd.OwnerSid = &SID{IdentifierAuthority: SECURITY_NT_AUTHORITY, SubAuthority: []uint32{18}} // LOCAL_SYSTEM
 	}
-	if r.AdditionalInformation()&GROUP_SECUIRTY_INFORMATION != 0 {
-		gid, _ := attrs.GetGID()
-		sd.GroupSid = SIDFromGid(gid)
+	if ai&GROUP_SECUIRTY_INFORMATION != 0 {
+		sd.GroupSid = &SID{IdentifierAuthority: SECURITY_NT_AUTHORITY, SubAuthority: []uint32{18}} // LOCAL_SYSTEM
 	}
-	if r.AdditionalInformation()&DACL_SECUIRTY_INFORMATION != 0 {
-		uid, _ := attrs.GetUID()
-		gid, _ := attrs.GetGID()
-		mode, _ := attrs.GetUnixMode()
-		switch attrs.GetFileType() {
-		case vfs.FileTypeDirectory:
-			mode |= syscall.S_IFDIR
-		case vfs.FileTypeSymlink:
-			mode |= syscall.S_IFLNK
-		default:
-			mode |= syscall.S_IFREG
-		}
-		// Use owner permissions for all ACEs since sambam runs as root
-		// and all clients effectively have owner-level access
-		ownerMode := uint8((mode & 0700) >> 6)
+	if ai&SACL_SECUIRTY_INFORMATION != 0 {
+		// Return an empty SACL when requested to avoid client errors.
+		sd.Sacl = &ACL{}
+	}
+	if ai&DACL_SECUIRTY_INFORMATION != 0 {
 		sd.Dacl = &ACL{
-			ACE{ //OWner
-				Sid:  SIDFromUid(uid),
+			ACE{
+				Sid:  &SID{IdentifierAuthority: WORLD_SID_AUTHORITY, SubAuthority: []uint32{0}}, // Everyone
 				Type: ACCESS_ALLOWED_ACE_TYPE,
-				Mask: UnixModeToAceMask(ownerMode),
-			},
-			ACE{ // Group
-				Sid:  SIDFromGid(gid),
-				Type: ACCESS_ALLOWED_ACE_TYPE,
-				Mask: UnixModeToAceMask(ownerMode),
-			},
-			ACE{ // Everyone
-				Sid:  &SID{IdentifierAuthority: WORLD_SID_AUTHORITY, SubAuthority: []uint32{0}},
-				Type: ACCESS_ALLOWED_ACE_TYPE,
-				Mask: UnixModeToAceMask(ownerMode),
-			},
-			ACE{ // Mode
-				Sid:  SIDFromMode(mode),
-				Type: ACCESS_DENIED_ACE_TYPE,
-				Mask: 0,
+				Mask: GENERIC_ALL,
 			},
 		}
+	}
+
+	if need := sd.Size(); need > int(r.OutputBufferLength()) {
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_BUFFER_TOO_SMALL))
+		rsp.ErrorData = &SmallBufferErrorResponse{RequiredBufferLength: uint32(need)}
+		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
 	rsp := new(QueryInfoResponse)
 	PrepareResponse(&rsp.PacketHeader, pkt, 0)
 	rsp.Output = &sd
-
-	//rsp := new(ErrorResponse)
-	//PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
-
 	return c.sendPacket(rsp, &t.treeConn, ctx)
 }
 
@@ -2519,11 +2580,46 @@ func (t *fileTree) setInfo(ctx *compoundContext, pkt []byte) error {
 }
 
 func (t *fileTree) oplockBreak(ctx *compoundContext, pkt []byte) error {
-	log.Errorf("OplockBreak")
+	log.Tracef("OplockBreak")
 	c := t.session.conn
 
-	rsp := new(ErrorResponse)
-	PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_NOT_SUPPORTED))
+	res, err := accept(SMB2_OPLOCK_BREAK, pkt)
+	if err != nil {
+		return err
+	}
+	if len(res) < 2 {
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INVALID_PARAMETER))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
+
+	structSize := binary.LittleEndian.Uint16(res[:2])
+	var body []byte
+	switch structSize {
+	case 24:
+		if len(res) < 24 {
+			rsp := new(ErrorResponse)
+			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INVALID_PARAMETER))
+			return c.sendPacket(rsp, &t.treeConn, ctx)
+		}
+		body = append([]byte(nil), res[:24]...)
+	case 36:
+		if len(res) < 36 {
+			rsp := new(ErrorResponse)
+			PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INVALID_PARAMETER))
+			return c.sendPacket(rsp, &t.treeConn, ctx)
+		}
+		body = append([]byte(nil), res[:36]...)
+	default:
+		log.Tracef("OplockBreak: unsupported structure size=%d", structSize)
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_INVALID_PARAMETER))
+		return c.sendPacket(rsp, &t.treeConn, ctx)
+	}
+
+	rsp := &OplockBreakResponse{Body: body}
+	PrepareResponse(&rsp.PacketHeader, pkt, 0)
+	log.Tracef("OplockBreak: ack structure size=%d", structSize)
 
 	return c.sendPacket(rsp, &t.treeConn, ctx)
 }

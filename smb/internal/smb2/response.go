@@ -74,6 +74,29 @@ func (r ErrorResponseDecoder) ErrorData() []byte {
 }
 
 // ----------------------------------------------------------------------------
+// SMB2 OPLOCK_BREAK Response
+//
+
+type OplockBreakResponse struct {
+	PacketHeader
+	Body []byte
+}
+
+func (c *OplockBreakResponse) Header() *PacketHeader {
+	return &c.PacketHeader
+}
+
+func (c *OplockBreakResponse) Size() int {
+	return 64 + len(c.Body)
+}
+
+func (c *OplockBreakResponse) Encode(pkt []byte) {
+	c.Command = SMB2_OPLOCK_BREAK
+	c.encodeHeader(pkt)
+	copy(pkt[64:], c.Body)
+}
+
+// ----------------------------------------------------------------------------
 // SMB2 Error Context Response
 //
 
@@ -767,7 +790,7 @@ func (c *CreateResponse) Header() *PacketHeader {
 
 func (c *CreateResponse) Size() int {
 	if len(c.Contexts) == 0 {
-		return 64 + 88 + 1
+		return 64 + 88
 	}
 
 	size := 64 + 88
@@ -806,6 +829,12 @@ func (c *CreateResponse) Encode(pkt []byte) {
 	le.PutUint32(res[56:60], c.FileAttributes)
 	c.FileId.Encode(res[64:80])
 
+	if len(c.Contexts) == 0 {
+		le.PutUint32(res[80:84], 0) // CreateContextsOffset
+		le.PutUint32(res[84:88], 0) // CreateContextsLength
+		return
+	}
+
 	off := 88
 
 	var ctx []byte
@@ -822,6 +851,8 @@ func (c *CreateResponse) Encode(pkt []byte) {
 
 		prevOff = off
 		ctx = res[off:]
+		// Default Next=0 for the last context; updated when a next context exists.
+		le.PutUint32(ctx[:4], 0)
 
 		c.Encode(ctx)
 
@@ -1538,7 +1569,7 @@ func (c *QueryInfoResponse) Header() *PacketHeader {
 
 func (c *QueryInfoResponse) Size() int {
 	if c.Output == nil {
-		return 64 + 8 + 1
+		return 64 + 8
 	}
 	return 64 + 8 + c.Output.Size()
 }
