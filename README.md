@@ -318,7 +318,7 @@ Then connect from Windows using `\\172.x.x.x\share` (the WSL IP).
 
 ## Known Issues
 
-- **Windows: Executables requiring admin rights fail to run from share** — `.exe` files that require elevated privileges (UAC) cannot be launched directly from the share. Copy the file to a local drive first as a workaround.
+None currently. All major functionality is working.
 
 ## Security Notice
 
