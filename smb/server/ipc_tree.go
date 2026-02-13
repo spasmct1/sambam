@@ -339,8 +339,15 @@ func (t *ipcTree) queryInfo(ctx *compoundContext, pkt []byte) error {
 		if ai&GROUP_SECUIRTY_INFORMATION != 0 {
 			sd.GroupSid = &SID{IdentifierAuthority: SECURITY_NT_AUTHORITY, SubAuthority: []uint32{18}} // LOCAL_SYSTEM
 		}
-		if ai&SACL_SECUIRTY_INFORMATION != 0 {
-			sd.Sacl = &ACL{}
+		if ai&(SACL_SECUIRTY_INFORMATION|LABEL_SECUIRTY_INFORMATION) != 0 {
+			// Return a medium-integrity mandatory label (S-1-16-8192).
+			sd.Sacl = &ACL{
+				ACE{
+					Sid:  &SID{IdentifierAuthority: MANDATORY_LABEL_AUTHORITY, SubAuthority: []uint32{8192}},
+					Type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+					Mask: 0,
+				},
+			}
 		}
 		if ai&DACL_SECUIRTY_INFORMATION != 0 {
 			sd.Dacl = &ACL{

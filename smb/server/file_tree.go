@@ -20,11 +20,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const (
-	O_SHLOCK = 0x10
-	O_EXLOCK = 0x20
-)
-
 var (
 	dirQueryLogMu       sync.Mutex
 	dirQueryLast        = map[string]time.Time{}
@@ -199,21 +194,13 @@ func (t *fileTree) create(ctx *compoundContext, pkt []byte) error {
 		return c.sendPacket(rsp, &t.treeConn, ctx)
 	}
 
-	lockLevel := r.RequestedOplockLevel()
+	// Never grant exclusive oplocks — we have no infrastructure to send
+	// oplock break notifications.  Without breaks, an exclusive oplock
+	// causes "invalid handle" errors on Windows 11 UAC elevation because
+	// the elevated process cannot open the file while the non-elevated
+	// explorer still holds the oplock.
+	lockLevel := uint8(SMB2_OPLOCK_LEVEL_NONE)
 	lockState := LOCKSTATE_NONE
-	switch lockLevel {
-	case SMB2_OPLOCK_LEVEL_II:
-		flags |= O_SHLOCK
-		lockState = LOCKSTATE_HELD
-	case SMB2_OPLOCK_LEVEL_EXCLUSIVE:
-		flags |= O_EXLOCK
-		lockState = LOCKSTATE_HELD
-	case SMB2_OPLOCK_LEVEL_LEASE:
-		// We'll decide based on whether we return a lease context.
-		lockLevel = SMB2_OPLOCK_LEVEL_NONE
-	default:
-		lockLevel = 0
-	}
 
 	access := r.DesiredAccess()
 	var h vfs.VfsHandle
@@ -2047,9 +2034,16 @@ func (t *fileTree) queryInfoSec(ctx *compoundContext, pkt []byte) error {
 	if ai&GROUP_SECUIRTY_INFORMATION != 0 {
 		sd.GroupSid = &SID{IdentifierAuthority: SECURITY_NT_AUTHORITY, SubAuthority: []uint32{18}} // LOCAL_SYSTEM
 	}
-	if ai&SACL_SECUIRTY_INFORMATION != 0 {
-		// Return an empty SACL when requested to avoid client errors.
-		sd.Sacl = &ACL{}
+	if ai&(SACL_SECUIRTY_INFORMATION|LABEL_SECUIRTY_INFORMATION) != 0 {
+		// Return a medium-integrity mandatory label (S-1-16-8192).
+		// Windows 11 UAC checks this when elevating executables from a share.
+		sd.Sacl = &ACL{
+			ACE{
+				Sid:  &SID{IdentifierAuthority: MANDATORY_LABEL_AUTHORITY, SubAuthority: []uint32{8192}},
+				Type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+				Mask: 0, // no mandatory policy (NW=0, NR=0, NX=0)
+			},
+		}
 	}
 	if ai&DACL_SECUIRTY_INFORMATION != 0 {
 		sd.Dacl = &ACL{

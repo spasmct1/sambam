@@ -2,6 +2,7 @@ package smb2
 
 import (
 	"context"
+	"crypto/sha512"
 	"fmt"
 	"io"
 	"os"
@@ -137,8 +138,22 @@ type conn struct {
 	serverCtx   *Server
 	serverState ConnState
 
+	// Post-negotiate preauth hash, saved for session binding (SMB 3.1.1).
+	negotiatePreauthHash [64]byte
+
+	// Pending session binding (e.g. UAC elevation on the same connection).
+	pendingSetup *pendingSessionSetup
+
 	treeMapByName map[string]treeOps
 	treeMapById   map[uint32]treeOps
+}
+
+// pendingSessionSetup holds state for a second session being established
+// on an already-active connection (e.g. Windows UAC elevation).
+type pendingSessionSetup struct {
+	spnego    *spnegoServer
+	sessionId uint64
+	preauthHash [64]byte // running preauth hash for this binding
 }
 
 func (conn *conn) getSession(sessionId uint64) *session {
@@ -207,7 +222,12 @@ func (conn *conn) encodePacket(req Packet, tc *treeConn, ctx context.Context) ([
 	s := conn.session
 
 	if s != nil && s.conn.useSession() {
-		hdr.SessionId = s.sessionId
+		// Only set SessionId from the active session if the caller hasn't
+		// already set it explicitly (e.g. session binding responses carry
+		// the new pending session ID).
+		if hdr.SessionId == 0 {
+			hdr.SessionId = s.sessionId
+		}
 
 		if tc != nil {
 			hdr.TreeId = tc.treeId
@@ -595,6 +615,17 @@ func (conn *conn) sendPacket(req Packet, tc *treeConn, compCtx *compoundContext)
 	switch conn.serverState {
 	case STATE_NEGOTIATE, STATE_SESSION_SETUP, STATE_SESSION_SETUP_CHALLENGE:
 		conn.calcPreauthHash(pkt)
+	}
+
+	// Hash session-binding responses into the pending preauth chain.
+	if conn.pendingSetup != nil && conn.dialect == SMB311 {
+		rp := PacketCodec(pkt)
+		if rp.Command() == SMB2_SESSION_SETUP && rp.SessionId() == conn.pendingSetup.sessionId {
+			h := sha512.New()
+			h.Write(conn.pendingSetup.preauthHash[:])
+			h.Write(pkt)
+			h.Sum(conn.pendingSetup.preauthHash[:0])
+		}
 	}
 	conn.m.Unlock()
 

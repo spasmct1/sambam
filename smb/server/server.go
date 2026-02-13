@@ -447,13 +447,13 @@ func (c *conn) sessionSetup(pkt []byte) error {
 	if c.useSession() {
 		p := PacketCodec(pkt)
 		reqSid := p.SessionId()
-		cur := c.session
 
-		// Only acknowledge setup for the already-active session id.
-		// Requests for sid=0 or a different sid on this connection must fail;
-		// returning success can make Windows switch session context and treat
-		// existing handles as invalid.
 		if reqSid != 0 {
+			// Check if this is step 2 of a pending session binding.
+			if c.pendingSetup != nil && c.pendingSetup.sessionId == reqSid {
+				return c.sessionSetupCompleteBinding(pkt)
+			}
+
 			s := c.getSession(reqSid)
 			if s == nil {
 				log.Tracef("session setup denied on active connection: unknown req sid=%d", reqSid)
@@ -474,22 +474,9 @@ func (c *conn) sessionSetup(pkt []byte) error {
 			return c.sendPacket(rsp, nil, nil)
 		}
 
-		if cur != nil {
-			// Windows sometimes probes with sid=0 on an active connection.
-			// Acknowledge with the current session to avoid auth prompts.
-			log.Tracef("session setup probe on active connection: req sid=0 current sid=%d", cur.sessionId)
-			rsp := &SessionSetupResponse{
-				SessionFlags: cur.sessionFlags,
-			}
-			rsp.Flags = 1
-			rsp.CreditRequestResponse = p.CreditRequest()
-			rsp.CreditCharge = 0
-			rsp.MessageId = p.MessageId()
-			rsp.SessionId = cur.sessionId
-			return c.sendPacket(rsp, nil, nil)
-		}
-
-		// sid=0 and no active session selected: continue with normal setup flow.
+		// sid=0 on an active connection: the client wants a new session
+		// (e.g. Windows UAC elevation binding a second session).
+		return c.sessionSetupNewBinding(pkt)
 	}
 
 	switch c.serverState {
@@ -716,7 +703,9 @@ func (n *ServerNegotiator) negotiate(conn *conn, pkt []byte) error {
 		rsp, _ := n.makeResponse(conn)
 		PrepareResponse(&rsp.PacketHeader, pkt, uint32(0))
 		rsp.SecurityBuffer = outputToken
-		return conn.sendPacket(rsp, nil, nil)
+		err := conn.sendPacket(rsp, nil, nil)
+		conn.negotiatePreauthHash = conn.preauthIntegrityHashValue
+		return err
 	}
 
 	// handle context for SMB311
@@ -781,7 +770,9 @@ func (n *ServerNegotiator) negotiate(conn *conn, pkt []byte) error {
 	rsp, _ := n.makeResponse(conn)
 	PrepareResponse(&rsp.PacketHeader, pkt, uint32(0))
 	rsp.SecurityBuffer = outputToken
-	return conn.sendPacket(rsp, nil, nil)
+	err = conn.sendPacket(rsp, nil, nil)
+	conn.negotiatePreauthHash = conn.preauthIntegrityHashValue
+	return err
 }
 
 func (n *ServerNegotiator) makeResponse(conn *conn) (*NegotiateResponse, error) {
@@ -1024,25 +1015,77 @@ func (c *conn) sessionServerSetupChallenge(pkt []byte) error {
 
 	if s.sessionFlags&(SMB2_SESSION_FLAG_IS_GUEST|SMB2_SESSION_FLAG_IS_NULL) == 0 {
 		sessionKey := c.serverCtx.negotiator.Spnego.sessionKey()
-		switch c.dialect {
-		case SMB202, SMB210:
-			s.signer = hmac.New(sha256.New, sessionKey)
-			s.verifier = hmac.New(sha256.New, sessionKey)
-		case SMB300, SMB302:
-			signingKey := kdf(sessionKey, []byte("SMB2AESCMAC\x00"), []byte("SmbSign\x00"))
-			ciph, err := aes.NewCipher(signingKey)
-			if err != nil {
-				return &InternalError{err.Error()}
-			}
-			s.signer = cmac.New(ciph)
-			s.verifier = cmac.New(ciph)
+		if err := c.deriveSessionKeys(s, sessionKey, c.preauthIntegrityHashValue); err != nil {
+			return err
+		}
+	}
 
-			// s.applicationKey = kdf(sessionKey, []byte("SMB2APP\x00"), []byte("SmbRpc\x00"))
+	// We set session before sending packet just for setting hdr.SessionId.
+	// But, we should not permit access from receiver until the session information is completed.
+	c.setSession(s)
 
-			encryptionKey := kdf(sessionKey, []byte("SMB2AESCCM\x00"), []byte("ServerIn \x00"))
-			decryptionKey := kdf(sessionKey, []byte("SMB2AESCCM\x00"), []byte("ServerOut\x00"))
+	c.serverState = STATE_SESSION_ACTIVE
+	if err = c.sendPacket(rsp, nil, nil); err == nil {
+		// now, allow access from receiver
+		c.enableSession()
+	}
 
-			ciph, err = aes.NewCipher(encryptionKey)
+	return err
+}
+
+// deriveSessionKeys sets up signing, encryption and decryption keys on
+// the session based on the negotiated dialect.  preauthHash is only used
+// for SMB 3.1.1.
+func (c *conn) deriveSessionKeys(s *session, sessionKey []byte, preauthHash [64]byte) error {
+	switch c.dialect {
+	case SMB202, SMB210:
+		s.signer = hmac.New(sha256.New, sessionKey)
+		s.verifier = hmac.New(sha256.New, sessionKey)
+	case SMB300, SMB302:
+		signingKey := kdf(sessionKey, []byte("SMB2AESCMAC\x00"), []byte("SmbSign\x00"))
+		ciph, err := aes.NewCipher(signingKey)
+		if err != nil {
+			return &InternalError{err.Error()}
+		}
+		s.signer = cmac.New(ciph)
+		s.verifier = cmac.New(ciph)
+
+		encryptionKey := kdf(sessionKey, []byte("SMB2AESCCM\x00"), []byte("ServerIn \x00"))
+		decryptionKey := kdf(sessionKey, []byte("SMB2AESCCM\x00"), []byte("ServerOut\x00"))
+
+		ciph, err = aes.NewCipher(encryptionKey)
+		if err != nil {
+			return &InternalError{err.Error()}
+		}
+		s.encrypter, err = ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
+		if err != nil {
+			return &InternalError{err.Error()}
+		}
+
+		ciph, err = aes.NewCipher(decryptionKey)
+		if err != nil {
+			return &InternalError{err.Error()}
+		}
+		s.decrypter, err = ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
+		if err != nil {
+			return &InternalError{err.Error()}
+		}
+	case SMB311:
+		s.preauthIntegrityHashValue = preauthHash
+		signingKey := kdf(sessionKey, []byte("SMBSigningKey\x00"), s.preauthIntegrityHashValue[:])
+		ciph, err := aes.NewCipher(signingKey)
+		if err != nil {
+			return &InternalError{err.Error()}
+		}
+		s.signer = cmac.New(ciph)
+		s.verifier = cmac.New(ciph)
+
+		encryptionKey := kdf(sessionKey, []byte("SMBC2CCipherKey\x00"), s.preauthIntegrityHashValue[:])
+		decryptionKey := kdf(sessionKey, []byte("SMBS2SCipherKey\x00"), s.preauthIntegrityHashValue[:])
+
+		switch c.cipherId {
+		case AES128CCM:
+			ciph, err := aes.NewCipher(encryptionKey)
 			if err != nil {
 				return &InternalError{err.Error()}
 			}
@@ -1059,71 +1102,176 @@ func (c *conn) sessionServerSetupChallenge(pkt []byte) error {
 			if err != nil {
 				return &InternalError{err.Error()}
 			}
-		case SMB311:
-			s.preauthIntegrityHashValue = c.preauthIntegrityHashValue
-			signingKey := kdf(sessionKey, []byte("SMBSigningKey\x00"), s.preauthIntegrityHashValue[:])
-			ciph, err := aes.NewCipher(signingKey)
+		case AES128GCM:
+			ciph, err := aes.NewCipher(encryptionKey)
 			if err != nil {
 				return &InternalError{err.Error()}
 			}
-			s.signer = cmac.New(ciph)
-			s.verifier = cmac.New(ciph)
+			s.encrypter, err = cipher.NewGCMWithNonceSize(ciph, 12)
+			if err != nil {
+				return &InternalError{err.Error()}
+			}
 
-			encryptionKey := kdf(sessionKey, []byte("SMBC2CCipherKey\x00"), s.preauthIntegrityHashValue[:])
-			decryptionKey := kdf(sessionKey, []byte("SMBS2SCipherKey\x00"), s.preauthIntegrityHashValue[:])
-
-			switch c.cipherId {
-			case AES128CCM:
-				ciph, err := aes.NewCipher(encryptionKey)
-				if err != nil {
-					return &InternalError{err.Error()}
-				}
-				s.encrypter, err = ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
-				if err != nil {
-					return &InternalError{err.Error()}
-				}
-
-				ciph, err = aes.NewCipher(decryptionKey)
-				if err != nil {
-					return &InternalError{err.Error()}
-				}
-				s.decrypter, err = ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
-				if err != nil {
-					return &InternalError{err.Error()}
-				}
-			case AES128GCM:
-				ciph, err := aes.NewCipher(encryptionKey)
-				if err != nil {
-					return &InternalError{err.Error()}
-				}
-				s.encrypter, err = cipher.NewGCMWithNonceSize(ciph, 12)
-				if err != nil {
-					return &InternalError{err.Error()}
-				}
-
-				ciph, err = aes.NewCipher(decryptionKey)
-				if err != nil {
-					return &InternalError{err.Error()}
-				}
-				s.decrypter, err = cipher.NewGCMWithNonceSize(ciph, 12)
-				if err != nil {
-					return &InternalError{err.Error()}
-				}
+			ciph, err = aes.NewCipher(decryptionKey)
+			if err != nil {
+				return &InternalError{err.Error()}
+			}
+			s.decrypter, err = cipher.NewGCMWithNonceSize(ciph, 12)
+			if err != nil {
+				return &InternalError{err.Error()}
 			}
 		}
 	}
+	return nil
+}
 
-	// We set session before sending packet just for setting hdr.SessionId.
-	// But, we should not permit access from receiver until the session information is completed.
-	c.setSession(s)
+// sessionSetupNewBinding starts a new session binding on an already-active
+// connection.  This is used when Windows UAC elevation needs a second
+// session for the elevated process.
+func (c *conn) sessionSetupNewBinding(pkt []byte) error {
+	log.Debugf("session binding step 1 (new session on active connection)")
 
-	c.serverState = STATE_SESSION_ACTIVE
-	if err = c.sendPacket(rsp, nil, nil); err == nil {
-		// now, allow access from receiver
-		c.enableSession()
+	p := PacketCodec(pkt)
+
+	res, err := accept(SMB2_SESSION_SETUP, pkt)
+	if err != nil {
+		rsp := new(ErrorResponse)
+		PrepareResponse(rsp.Header(), pkt, uint32(STATUS_INVALID_PARAMETER))
+		return c.sendPacket(rsp, nil, nil)
 	}
 
-	return err
+	r := SessionSetupRequestDecoder(res)
+	if r.IsInvalid() {
+		return &InvalidRequestError{"broken session setup request format"}
+	}
+
+	// Create a fresh SPNEGO server for this binding (the connection-level
+	// Spnego was used for the original session and may retain stale state).
+	bindSpnego := newSpnegoServer([]Authenticator{c.serverCtx.authenticator})
+
+	outputToken, err := bindSpnego.challenge(r.SecurityBuffer())
+	if err != nil {
+		log.Warnf("session binding challenge failed: %v", err)
+		rsp := new(ErrorResponse)
+		PrepareResponse(rsp.Header(), pkt, uint32(STATUS_LOGON_FAILURE))
+		return c.sendPacket(rsp, nil, nil)
+	}
+
+	sessionId := randint64()
+
+	// Compute the binding's preauth hash: start from the post-negotiate
+	// hash and add this request packet.
+	bindHash := c.negotiatePreauthHash
+	if c.dialect == SMB311 {
+		h := sha512.New()
+		h.Write(bindHash[:])
+		h.Write(pkt)
+		h.Sum(bindHash[:0])
+	}
+
+	c.pendingSetup = &pendingSessionSetup{
+		spnego:    bindSpnego,
+		sessionId: sessionId,
+		preauthHash: bindHash,
+	}
+
+	rsp := &SessionSetupResponse{
+		SecurityBuffer: outputToken,
+	}
+	rsp.Flags = 1
+	rsp.CreditRequestResponse = p.CreditRequest()
+	rsp.CreditCharge = 0
+	rsp.MessageId = p.MessageId()
+	rsp.Status = uint32(STATUS_MORE_PROCESSING_REQUIRED)
+	rsp.SessionId = sessionId
+
+	log.Tracef("session binding: issued challenge, pending sid=%d", sessionId)
+
+	// sendPacket will hash the response into pendingSetup.preauthHash
+	// for SMB 3.1.1 (see conn.go sendPacket logic).
+	return c.sendPacket(rsp, nil, nil)
+}
+
+// sessionSetupCompleteBinding completes a pending session binding (step 2).
+func (c *conn) sessionSetupCompleteBinding(pkt []byte) error {
+	log.Debugf("session binding step 2 (completing binding)")
+
+	p := PacketCodec(pkt)
+	ps := c.pendingSetup
+
+	res, err := accept(SMB2_SESSION_SETUP, pkt)
+	if err != nil {
+		c.pendingSetup = nil
+		rsp := new(ErrorResponse)
+		PrepareResponse(rsp.Header(), pkt, uint32(STATUS_INVALID_PARAMETER))
+		return c.sendPacket(rsp, nil, nil)
+	}
+
+	r := SessionSetupRequestDecoder(res)
+	if r.IsInvalid() {
+		c.pendingSetup = nil
+		return &InvalidRequestError{"broken session setup request format"}
+	}
+
+	// Update binding preauth hash with this request.
+	if c.dialect == SMB311 {
+		h := sha512.New()
+		h.Write(ps.preauthHash[:])
+		h.Write(pkt)
+		h.Sum(ps.preauthHash[:0])
+	}
+
+	outputToken, user, err := ps.spnego.authenticate(r.SecurityBuffer())
+	if err != nil {
+		if c.serverCtx.onAuthFail != nil {
+			c.serverCtx.onAuthFail(c.remoteAddr, authFailedUserFromError(err))
+		}
+		log.Warnf("session binding authentication failed: %v", err)
+		c.pendingSetup = nil
+		rsp := new(ErrorResponse)
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_LOGON_FAILURE))
+		return c.sendPacket(rsp, nil, nil)
+	}
+
+	log.Infof("session binding authenticated: %s (sid=%d)", user, ps.sessionId)
+
+	flags := uint16(0)
+	if c.serverCtx.allowGuest {
+		flags = SMB2_SESSION_FLAG_IS_GUEST
+	}
+
+	s := &session{
+		conn:           c,
+		treeConnTables: make(map[uint32]*treeConn),
+		sessionFlags:   flags,
+		sessionId:      ps.sessionId,
+	}
+
+	if s.sessionFlags&(SMB2_SESSION_FLAG_IS_GUEST|SMB2_SESSION_FLAG_IS_NULL) == 0 {
+		sessionKey := ps.spnego.sessionKey()
+		if err := c.deriveSessionKeys(s, sessionKey, ps.preauthHash); err != nil {
+			c.pendingSetup = nil
+			return err
+		}
+	}
+
+	c.pendingSetup = nil
+
+	// Add the new session to the connection's session map.
+	c.setSession(s)
+
+	rsp := &SessionSetupResponse{
+		SessionFlags:   s.sessionFlags,
+		SecurityBuffer: outputToken,
+	}
+	rsp.Flags = 1
+	rsp.CreditRequestResponse = p.CreditRequest()
+	rsp.CreditCharge = 0
+	rsp.MessageId = p.MessageId()
+	rsp.SessionId = s.sessionId
+	rsp.SecurityBuffer = outputToken
+
+	return c.sendPacket(rsp, nil, nil)
 }
 
 func (d *Server) addOpen(open *Open) {
