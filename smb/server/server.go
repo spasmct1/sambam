@@ -989,8 +989,10 @@ func (c *conn) sessionServerSetupChallenge(pkt []byte) error {
 			c.serverCtx.onAuthFail(c.remoteAddr, authFailedUserFromError(err))
 		}
 		log.Warnf("authentication failed: %v", err)
+		// Reset state so the client can retry with different credentials.
+		c.serverState = STATE_SESSION_SETUP
 		rsp := new(ErrorResponse)
-		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_ACCESS_DENIED))
+		PrepareResponse(&rsp.PacketHeader, pkt, uint32(STATUS_LOGON_FAILURE))
 		return c.sendPacket(rsp, nil, nil)
 	}
 

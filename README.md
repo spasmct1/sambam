@@ -316,6 +316,10 @@ Then connect from Windows using `\\172.x.x.x\share` (the WSL IP).
 - **Linux server** - Works on any distribution (Debian, Ubuntu, OpenWrt, Alpine, etc.)
 - **Clients** - Windows 10/11, macOS, or Linux (via CIFS mount)
 
+## Known Issues
+
+- **Windows: Executables requiring admin rights fail to run from share** — `.exe` files that require elevated privileges (UAC) cannot be launched directly from the share. Copy the file to a local drive first as a workaround.
+
 ## Security Notice
 
 By default, sambam uses anonymous/guest authentication. This means:

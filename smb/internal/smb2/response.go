@@ -1147,7 +1147,7 @@ func (c *ReadResponse) Header() *PacketHeader {
 
 func (c *ReadResponse) Size() int {
 	if len(c.Data) == 0 {
-		return 64 + 16 + 1
+		return 64 + 16
 	}
 	return 64 + 16 + len(c.Data)
 }
@@ -1158,8 +1158,12 @@ func (c *ReadResponse) Encode(pkt []byte) {
 
 	res := pkt[64:]
 	le.PutUint16(res[:2], 17) // StructureSize
-	res[2] = 16 + 64          // DataOffset
-	copy(res[16:], c.Data)
+	if len(c.Data) == 0 {
+		res[2] = 0 // DataOffset
+	} else {
+		res[2] = 16 + 64 // DataOffset
+		copy(res[16:], c.Data)
+	}
 	le.PutUint32(res[4:8], uint32(len(c.Data))) // DataLength
 	le.PutUint32(res[8:12], c.DataRemaining)
 }
@@ -1839,6 +1843,10 @@ func (r *DiskIdResponse) Size() int {
 }
 
 func (r *DiskIdResponse) Encode(pkt []byte) {
+	// Spec requires 32 bytes with 16 bytes reserved as zero.
+	for i := 0; i < 32; i++ {
+		pkt[i] = 0
+	}
 	le.PutUint64(pkt[0:], r.DiskFileId)
 	le.PutUint64(pkt[8:], r.VolumeId)
 }
