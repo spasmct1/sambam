@@ -34,7 +34,7 @@ Done. They open `\\your-ip\share` in Explorer. Files are flowing. You're a hero.
 - **Optional authentication** - Require username/password when you need it
 - **Multiple shares** - Share multiple directories with different names
 - **Auto-expire** - Automatically stop sharing after a set time
-- **Config file** - Save your settings in `~/.sambamrc`
+- **Config file** - Layered config from `~/.sambamrc` and `./.sambamrc`
 - **Cross-platform clients** - Works with Windows 10/11, macOS, and Linux (CIFS mount)
 - **SMB 2.1 / 3.0 / 3.1.1** - Compatible with modern SMB protocol versions, including POSIX extensions
 - **Single binary** - Runs on any Linux distribution (Debian, Ubuntu, OpenWrt, etc.)
@@ -72,7 +72,7 @@ sudo sambam -r -n photos ~/Pictures
 
 ### `-n, --name <name>` or `-n <name:path>`
 
-Set the share name. By default the share is called `share`. Use `name:path` syntax to specify both name and path. Repeatable for multiple shares.
+Set the share name. By default the share name is the directory name. Use `name:path` syntax to specify both name and path. Repeatable for multiple shares.
 
 ```bash
 sudo sambam -n myfiles /data
@@ -151,10 +151,11 @@ PID file location for daemon mode. Default: `/tmp/sambam.pid`.
 
 ### `-L, --logfile <path>`
 
-Log file path for daemon mode. Without this, daemon output goes to `/dev/null`.
+Log file path. In daemon mode, logs go to this file (otherwise daemon output goes to `/dev/null`). In foreground mode, logs are written to both terminal and this file.
 
 ```bash
 sudo sambam -d -L /var/log/sambam.log /data
+sudo sambam -L /tmp/sambam.log /data
 ```
 
 ### `-V, --version`
@@ -167,7 +168,32 @@ Show help and exit.
 
 ## Configuration File
 
-You can save your settings in `~/.sambamrc` (TOML format):
+sambam reads configuration in this order:
+
+1. Base config: `~/.sambamrc` (if present)
+2. Local overrides: `./.sambamrc` (if present)
+
+Local config overrides only the keys explicitly set in `./.sambamrc`.
+For `[shares]`, entries are merged by share name (local entries override same-name entries from home config).
+
+Finally, CLI flags override config values.
+
+Example `~/.sambamrc` + `./.sambamrc` layering:
+
+```toml
+# ~/.sambamrc
+listen = "10.23.22.13:445"
+readonly = false
+```
+
+```toml
+# ./.sambamrc
+readonly = true
+```
+
+Result: `listen` comes from home config, `readonly` comes from local config.
+
+Example configuration file (TOML):
 
 ```toml
 # Listen address
@@ -204,7 +230,21 @@ docs = "/home/user/documents"
 pics = "/home/user/photos"
 ```
 
-CLI flags override config file settings. See `sambamrc.example` for a full example.
+See `sambamrc.example` for a full example.
+
+### Troubleshooting config selection
+
+Run with verbosity to see exactly which config files were loaded:
+
+```bash
+sambam -v
+```
+
+You will see a line like:
+
+```text
+config: home=true (/root/.sambamrc), local=true (.sambamrc)
+```
 
 ## Connecting from Windows
 

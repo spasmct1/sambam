@@ -3,12 +3,14 @@ package main
 import (
 	"crypto/rand"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,25 +48,167 @@ type Config struct {
 	Shares       map[string]string `toml:"shares"`
 }
 
-// loadConfig loads configuration from ~/.sambamrc if it exists
-func loadConfig() *Config {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
+type ConfigLoadInfo struct {
+	HomePath    string
+	HomeLoaded  bool
+	LocalPath   string
+	LocalLoaded bool
+	SettingSrc  map[string]string
+}
 
-	configPath := filepath.Join(home, ".sambamrc")
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return nil
-	}
-
+func decodeConfigFile(path string) (*Config, toml.MetaData, error) {
 	var config Config
-	if _, err := toml.DecodeFile(configPath, &config); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Error reading %s: %v\n", configPath, err)
-		return nil
+	md, err := toml.DecodeFile(path, &config)
+	if err != nil {
+		return nil, md, err
+	}
+	return &config, md, nil
+}
+
+func applyConfigOverrides(dst *Config, src *Config, md toml.MetaData) {
+	if md.IsDefined("listen") {
+		dst.Listen = src.Listen
+	}
+	if md.IsDefined("readonly") {
+		dst.Readonly = src.Readonly
+	}
+	if md.IsDefined("verbose") {
+		dst.Verbose = src.Verbose
+	}
+	if md.IsDefined("verbose_level") {
+		dst.VerboseLevel = src.VerboseLevel
+	}
+	if md.IsDefined("debug") {
+		dst.Debug = src.Debug
+	}
+	if md.IsDefined("trace") {
+		dst.Trace = src.Trace
+	}
+	if md.IsDefined("hide_dotfiles") {
+		dst.HideDotfiles = src.HideDotfiles
+	}
+	if md.IsDefined("username") {
+		dst.Username = src.Username
+	}
+	if md.IsDefined("password") {
+		dst.Password = src.Password
+	}
+	if md.IsDefined("expire") {
+		dst.Expire = src.Expire
+	}
+	if md.IsDefined("pidfile") {
+		dst.PidFile = src.PidFile
+	}
+	if md.IsDefined("logfile") {
+		dst.LogFile = src.LogFile
+	}
+	if md.IsDefined("shares") {
+		if dst.Shares == nil {
+			dst.Shares = map[string]string{}
+		}
+		for name, path := range src.Shares {
+			dst.Shares[name] = path
+		}
+	}
+}
+
+func recordConfigSources(info *ConfigLoadInfo, md toml.MetaData, src string, cfg *Config) {
+	record := func(key string) {
+		info.SettingSrc[key] = src
+	}
+	if md.IsDefined("listen") {
+		record("listen")
+	}
+	if md.IsDefined("readonly") {
+		record("readonly")
+	}
+	if md.IsDefined("verbose") {
+		record("verbose")
+	}
+	if md.IsDefined("verbose_level") {
+		record("verbose_level")
+	}
+	if md.IsDefined("debug") {
+		record("debug")
+	}
+	if md.IsDefined("trace") {
+		record("trace")
+	}
+	if md.IsDefined("hide_dotfiles") {
+		record("hide_dotfiles")
+	}
+	if md.IsDefined("username") {
+		record("username")
+	}
+	if md.IsDefined("password") {
+		record("password")
+	}
+	if md.IsDefined("expire") {
+		record("expire")
+	}
+	if md.IsDefined("pidfile") {
+		record("pidfile")
+	}
+	if md.IsDefined("logfile") {
+		record("logfile")
+	}
+	if md.IsDefined("shares") {
+		record("shares")
+		for name := range cfg.Shares {
+			record("shares." + name)
+		}
+	}
+}
+
+// loadConfig loads configuration from ~/.sambamrc and overlays ./.sambamrc.
+func loadConfig() (*Config, ConfigLoadInfo) {
+	var merged Config
+	hasConfig := false
+	info := ConfigLoadInfo{
+		HomePath:  filepath.Join(os.Getenv("HOME"), ".sambamrc"),
+		LocalPath: ".sambamrc",
+		SettingSrc: map[string]string{},
 	}
 
-	return &config
+	// Load user config as base.
+	home, err := os.UserHomeDir()
+	if err == nil {
+		configPath := filepath.Join(home, ".sambamrc")
+		info.HomePath = configPath
+		if _, err := os.Stat(configPath); err == nil {
+			cfg, md, err := decodeConfigFile(configPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Error reading %s: %v\n", configPath, err)
+			} else {
+				merged = *cfg
+				hasConfig = true
+				info.HomeLoaded = true
+				recordConfigSources(&info, md, "home", cfg)
+			}
+		}
+	}
+
+	// Overlay project-local config by explicit keys only.
+	if _, err := os.Stat(".sambamrc"); err == nil {
+		cfg, md, err := decodeConfigFile(".sambamrc")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Error reading .sambamrc: %v\n", err)
+		} else if !hasConfig {
+			merged = *cfg
+			hasConfig = true
+			info.LocalLoaded = true
+			recordConfigSources(&info, md, "local", cfg)
+		} else {
+			applyConfigOverrides(&merged, cfg, md)
+			info.LocalLoaded = true
+			recordConfigSources(&info, md, "local", cfg)
+		}
+	}
+
+	if !hasConfig {
+		return nil, info
+	}
+	return &merged, info
 }
 
 // logFormatter formats logrus entries to match sambam output style:
@@ -110,7 +254,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.4.10"
+	version = "1.4.11"
 )
 
 func main() {
@@ -121,7 +265,7 @@ func main() {
 	}
 
 	// Load config file
-	config := loadConfig()
+	config, configInfo := loadConfig()
 
 	// CLI flags
 	shareSpecs := pflag.StringArrayP("name", "n", []string{}, "Share specification (name:path or just name)")
@@ -133,7 +277,7 @@ func main() {
 	// Daemon mode flags
 	daemonMode := pflag.BoolP("daemon", "d", false, "Run as background daemon")
 	pidFile := pflag.StringP("pidfile", "p", "/tmp/sambam.pid", "PID file location (daemon mode)")
-	logFile := pflag.StringP("logfile", "L", "", "Log file path (daemon mode)")
+	logFile := pflag.StringP("logfile", "L", "", "Log file path")
 
 	// Verbosity flags
 	verbose := pflag.CountP("verbose", "v", "Show connections and file activity (-vv extended, -vvv full trace)")
@@ -208,8 +352,41 @@ func main() {
 		logrus.SetLevel(logrus.ErrorLevel)
 	}
 
+	// Allow logfile usage in foreground mode as well.
+	if *logFile != "" && !*daemonMode {
+		f, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0640)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening logfile %s: %v\n", *logFile, err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		logrus.SetOutput(io.MultiWriter(os.Stdout, f))
+		log.SetOutput(io.MultiWriter(os.Stderr, f))
+	}
+
+	// When --listen is explicitly set on CLI, require a literal IP
+	// (with optional port) to avoid late DNS/listener failures.
+	if pflag.CommandLine.Changed("listen") {
+		host, port := parseHostPort(*listenAddr)
+		if host == "" || net.ParseIP(host) == nil {
+			fmt.Fprintf(os.Stderr, "Invalid listen address %q: expected IP or IP:port\n", *listenAddr)
+			os.Exit(1)
+		}
+		if port != "" {
+			p, err := strconv.Atoi(port)
+			if err != nil || p < 1 || p > 65535 {
+				fmt.Fprintf(os.Stderr, "Invalid listen port in %q: expected 1-65535\n", *listenAddr)
+				os.Exit(1)
+			}
+		}
+	}
+
 	extraVerbose := *verbose >= 2
 	fullVerbose := *verbose >= 3
+	actualPassword := *password
+	if *username != "" && actualPassword == "" {
+		actualPassword = generatePassword(10)
+	}
 
 	if *showHelp {
 		printUsage()
@@ -219,6 +396,29 @@ func main() {
 	if *showVersion {
 		fmt.Printf("sambam %s (built with AI assistance)\n", version)
 		os.Exit(0)
+	}
+
+	configLogsPrinted := false
+	printConfigLogs := func() {
+		if configLogsPrinted || *verbose <= 0 {
+			return
+		}
+		configLogsPrinted = true
+		if configInfo.HomeLoaded || configInfo.LocalLoaded {
+			logrus.Infof("config: home=%t (%s), local=%t (%s)", configInfo.HomeLoaded, configInfo.HomePath, configInfo.LocalLoaded, configInfo.LocalPath)
+		} else {
+			logrus.Infof("config: no config file loaded (checked %s and %s)", configInfo.HomePath, configInfo.LocalPath)
+		}
+		if *verbose >= 2 && len(configInfo.SettingSrc) > 0 {
+			keys := make([]string, 0, len(configInfo.SettingSrc))
+			for k := range configInfo.SettingSrc {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				logrus.Debugf("config setting: %s <- %s", k, configInfo.SettingSrc[k])
+			}
+		}
 	}
 
 	// Parse shares
@@ -304,6 +504,14 @@ func main() {
 		logFileName := *logFile
 		if logFileName == "" {
 			logFileName = "/dev/null"
+		} else {
+			// Start each daemon run with a fresh logfile.
+			f, err := os.OpenFile(logFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0640)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error opening logfile %s: %v\n", logFileName, err)
+				os.Exit(1)
+			}
+			f.Close()
 		}
 
 		// Get current working directory to preserve it in daemon
@@ -326,12 +534,33 @@ func main() {
 
 		if child != nil {
 			// Parent process
-			fmt.Printf("Daemon started with PID %d\n", child.Pid)
-			fmt.Printf("PID file: %s\n", *pidFile)
-			if *logFile != "" {
-				fmt.Printf("Log file: %s\n", *logFile)
+			// Show connection details even in daemon mode.
+			listenHost, listenPort := parseHostPort(*listenAddr)
+			if listenPort == "" {
+				listenPort = "445"
 			}
-			fmt.Println("Use 'sambam stop' to stop the daemon")
+			fullListenAddr := net.JoinHostPort(listenHost, listenPort)
+			var displayIPs []string
+			if listenHost == "0.0.0.0" || listenHost == "" {
+				displayIPs = getLocalIPs()
+			} else {
+				displayIPs = []string{listenHost}
+			}
+			portSuffix := ""
+			if listenPort != "445" {
+				portSuffix = ":" + listenPort
+			}
+			printBanner(shares, *readOnly, fullListenAddr, displayIPs, portSuffix, *username, actualPassword, *expireStr, true)
+			printConfigLogs()
+
+			fmt.Println()
+			fmt.Printf("  %-12s %s\n", "Status", Green("daemon started"))
+			fmt.Printf("  %-12s %d\n", "PID", child.Pid)
+			fmt.Printf("  %-12s %s\n", "PID file", *pidFile)
+			if *logFile != "" {
+				fmt.Printf("  %-12s %s\n", "Log file", *logFile)
+			}
+			fmt.Printf("  %-12s %s\n", "Control", Cyan("sambam stop"))
 			os.Exit(0)
 		}
 
@@ -439,13 +668,9 @@ func main() {
 	// Setup authentication
 	userPassword := map[string]string{}
 	allowGuest := true
-	actualPassword := *password
 
 	if *username != "" {
 		allowGuest = false
-		if actualPassword == "" {
-			actualPassword = generatePassword(10)
-		}
 		userPassword[*username] = actualPassword
 	}
 
@@ -493,9 +718,10 @@ func main() {
 		portSuffix = ":" + listenPort
 	}
 
-	// Print banner (skipped in daemon mode without logfile)
+	// Print banner in foreground mode.
 	if !*daemonMode {
-		printBanner(shares, *readOnly, fullListenAddr, displayIPs, portSuffix, *username, actualPassword, *expireStr)
+		printBanner(shares, *readOnly, fullListenAddr, displayIPs, portSuffix, *username, actualPassword, *expireStr, false)
+		printConfigLogs()
 	}
 
 	// Start server in goroutine
@@ -607,7 +833,7 @@ func normalizeLogPath(path string) string {
 	return path
 }
 
-func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []string, portSuffix string, username string, password string, expireStr string) {
+func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []string, portSuffix string, username string, password string, expireStr string, daemonMode bool) {
 	fmt.Println()
 	fmt.Printf("  %s\n", CyanBold("sambam v"+version))
 	fmt.Println()
@@ -710,7 +936,9 @@ func printBanner(shares []Share, readOnly bool, listenAddr string, displayIPs []
 	fmt.Println()
 	fmt.Printf("  %s\n", Dim("Built with AI assistance"))
 	fmt.Println()
-	if expireStr != "" {
+	if daemonMode {
+		fmt.Printf("  %s\n", Red("Daemon mode: running in background"))
+	} else if expireStr != "" {
 		fmt.Printf("  %s\n", Dim("Press Ctrl+C to stop, or wait for expiry"))
 		fmt.Println()
 		// Initial expires line - no newline so countdown can overwrite
@@ -731,23 +959,32 @@ func printUsage() {
 	fmt.Printf("    %s\n", Cyan("sambam stop"))
 	fmt.Println()
 	fmt.Println(Bold("  Options:"))
-	fmt.Printf("    %s, %s      %s\n", Green("-n"), Green("--name"), "Share name or name:path "+Dim("(repeatable)"))
-	fmt.Printf("    %s, %s    %s\n", Green("-l"), Green("--listen"), "Address to listen on "+Dim("(default: 0.0.0.0:445)"))
-	fmt.Printf("    %s, %s  %s\n", Green("-r"), Green("--readonly"), "Make share read-only")
-	fmt.Printf("        %s  %s\n", Green("--username"), "Require authentication")
-	fmt.Printf("        %s  %s\n", Green("--password"), "Password "+Dim("(random if not set)"))
-	fmt.Printf("        %s    %s\n", Green("--expire"), "Auto-shutdown after duration "+Dim("(e.g., 30m, 1h)"))
-	fmt.Printf("    %s, %s   %s\n", Green("-v"), Green("--verbose"), "Show connections and file activity "+Dim("(-vv extended, -vvv full trace)"))
-	fmt.Printf("        %s     %s\n", Green("--trace"), "Full protocol trace (very verbose)")
-	fmt.Printf("        %s\n", Green("--hide-dotfiles")+"  Hide files starting with '.'")
-	fmt.Printf("    %s, %s    %s\n", Green("-d"), Green("--daemon"), "Run as background daemon")
-	fmt.Printf("    %s, %s   %s\n", Green("-p"), Green("--pidfile"), "PID file location "+Dim("(default: /tmp/sambam.pid)"))
-	fmt.Printf("    %s, %s   %s\n", Green("-L"), Green("--logfile"), "Log file path (daemon mode)")
-	fmt.Printf("    %s, %s   %s\n", Green("-V"), Green("--version"), "Show version")
-	fmt.Printf("    %s, %s      %s\n", Green("-h"), Green("--help"), "Show help")
+	printOpt := func(label, desc string) {
+		const colWidth = 22
+		pad := colWidth - len(label)
+		if pad < 2 {
+			pad = 2
+		}
+		fmt.Printf("    %s%s%s\n", Green(label), strings.Repeat(" ", pad), desc)
+	}
+
+	printOpt("-n, --name", "Share name or name:path "+Dim("(repeatable)"))
+	printOpt("-l, --listen", "Address to listen on "+Dim("(default: 0.0.0.0:445)"))
+	printOpt("-r, --readonly", "Make share read-only")
+	printOpt("--username", "Require authentication")
+	printOpt("--password", "Password "+Dim("(random if not set)"))
+	printOpt("--expire", "Auto-shutdown after duration "+Dim("(e.g., 30m, 1h)"))
+	printOpt("-v, --verbose", "Show connections and file activity "+Dim("(-vv extended, -vvv full trace)"))
+	printOpt("--trace", "Full protocol trace "+Dim("(very verbose)"))
+	printOpt("--hide-dotfiles", "Hide files starting with '.'")
+	printOpt("-d, --daemon", "Run as background daemon")
+	printOpt("-p, --pidfile", "PID file location "+Dim("(default: /tmp/sambam.pid)"))
+	printOpt("-L, --logfile", "Log file path")
+	printOpt("-V, --version", "Show version")
+	printOpt("-h, --help", "Show help")
 	fmt.Println()
 	fmt.Println(Bold("  Examples:"))
-	fmt.Printf("    %s  %s\n", Cyan("sambam")+"                              ", Dim("# Share current directory as 'share'"))
+	fmt.Printf("    %s  %s\n", Cyan("sambam")+"                              ", Dim("# Share current directory using its folder name"))
 	fmt.Printf("    %s  %s\n", Cyan("sambam /path/to/folder")+"              ", Dim("# Share specific directory"))
 	fmt.Printf("    %s  %s\n", Cyan("sambam -n myfiles .")+"                 ", Dim("# Share current dir as 'myfiles'"))
 	fmt.Printf("    %s  %s\n", Cyan("sambam -n docs:/docs -n pics:/photos"), Dim("# Multiple shares"))
