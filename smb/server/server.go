@@ -11,7 +11,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -223,8 +222,7 @@ func (d *Server) Serve(addr string) error {
 	// Listen on TCP port 8080 on all available interfaces.
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error setting up listener: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	d.listener = listener
 	defer listener.Close()

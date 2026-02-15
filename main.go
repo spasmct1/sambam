@@ -160,6 +160,52 @@ func recordConfigSources(info *ConfigLoadInfo, md toml.MetaData, src string, cfg
 	}
 }
 
+func configValueString(cfg *Config, key string) string {
+	if cfg == nil {
+		return "<unset>"
+	}
+	switch key {
+	case "listen":
+		return cfg.Listen
+	case "readonly":
+		return strconv.FormatBool(cfg.Readonly)
+	case "verbose":
+		return strconv.FormatBool(cfg.Verbose)
+	case "verbose_level":
+		return strconv.Itoa(cfg.VerboseLevel)
+	case "debug":
+		return strconv.FormatBool(cfg.Debug)
+	case "trace":
+		return strconv.FormatBool(cfg.Trace)
+	case "hide_dotfiles":
+		return strconv.FormatBool(cfg.HideDotfiles)
+	case "username":
+		return cfg.Username
+	case "password":
+		if cfg.Password == "" {
+			return ""
+		}
+		return "<set>"
+	case "expire":
+		return cfg.Expire
+	case "pidfile":
+		return cfg.PidFile
+	case "logfile":
+		return cfg.LogFile
+	case "shares":
+		return strconv.Itoa(len(cfg.Shares))
+	default:
+		if strings.HasPrefix(key, "shares.") {
+			name := strings.TrimPrefix(key, "shares.")
+			if cfg.Shares == nil {
+				return ""
+			}
+			return cfg.Shares[name]
+		}
+	}
+	return "<unknown>"
+}
+
 // loadConfig loads configuration from ~/.sambamrc and overlays ./.sambamrc.
 func loadConfig() (*Config, ConfigLoadInfo) {
 	var merged Config
@@ -254,7 +300,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.4.11"
+	version = "1.4.12"
 )
 
 func main() {
@@ -416,7 +462,7 @@ func main() {
 			}
 			sort.Strings(keys)
 			for _, k := range keys {
-				logrus.Debugf("config setting: %s <- %s", k, configInfo.SettingSrc[k])
+				logrus.Debugf("config setting: %s=%q <- %s", k, configValueString(config, k), configInfo.SettingSrc[k])
 			}
 		}
 	}
@@ -490,12 +536,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %s is not a directory\n", share.Path)
 			os.Exit(1)
 		}
-	}
-
-	// Check if running as root (required for port 445)
-	if os.Geteuid() != 0 {
-		fmt.Fprintln(os.Stderr, "Warning: Not running as root. Port 445 typically requires root privileges.")
-		fmt.Fprintln(os.Stderr, "         Consider using: sudo sambam")
 	}
 
 	// Handle daemon mode
@@ -730,7 +770,12 @@ func main() {
 			if *daemonMode && *logFile != "" {
 				log.Printf("Server error: %v", err)
 			} else if !*daemonMode {
-				fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
+				fmt.Println()
+				fmt.Printf("  %s %s\n", Red("Error:"), Red(err.Error()))
+				if os.Geteuid() != 0 && listenPort == "445" && strings.Contains(strings.ToLower(err.Error()), "permission denied") {
+					fmt.Printf("  %s\n", Red("Port 445 requires root privileges on Linux."))
+					fmt.Printf("  %-12s %s\n", "Try", Cyan("sudo sambam ..."))
+				}
 			}
 			os.Exit(1)
 		}
