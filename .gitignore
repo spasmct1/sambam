@@ -3,6 +3,9 @@ sambam
 sambam-*
 quickshare
 
+# Build artifacts
+dist/
+
 # IDE
 .idea/
 .vscode/
