@@ -392,7 +392,16 @@ Then connect from Windows using `\\172.x.x.x\share` (the WSL IP).
 
 ## Known Issues
 
-None currently. All major functionality is working.
+### Platform-Specific Notes
+
+**Linux** - Fully stable. All features working including POSIX extensions, file permissions, and advanced operations.
+
+**macOS (Apple Silicon)** - Excellent support. Thoroughly tested and works as reliably as Linux. All features including POSIX extensions fully functional. No known issues.
+
+**Windows** - Experimental build
+- No POSIX extensions support (limitations on Unix-style permissions)
+- File deletion issues: Files cannot be deleted while the daemon is running (Windows file locking behavior)
+- Other features work correctly
 
 ## Security Notice
 
