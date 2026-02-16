@@ -1,5 +1,8 @@
 project_name: sambam
 
+# Configuration format version (v1 for older goreleaser)
+version: 1
+
 before:
   hooks:
     - go mod tidy
