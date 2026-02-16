@@ -1,0 +1,99 @@
+.TH SAMBAM 1 "February 2026" "sambam" "User Commands"
+.SH NAME
+sambam \- instant SMB/CIFS file sharing
+.SH SYNOPSIS
+.B sambam
+.RI [ options ]
+.RI [ directory ]
+.br
+.B sambam
+.B stop
+.SH DESCRIPTION
+.B sambam
+starts a lightweight SMB server to share local directories with Windows, macOS, and Linux clients.
+By default, it shares the current directory using the directory name as share name.
+.SH CONFIGURATION
+Configuration is loaded in this order, with later layers overriding keys set earlier:
+.IP "1." 4
+.I /etc/sambamrc
+.IP "2." 4
+.I ~/.sambamrc
+.IP "3." 4
+.I ./.sambamrc
+.PP
+Command-line flags override all config file values.
+.SH OPTIONS
+.TP
+.BR "-n, --name" " <name|name:path>"
+Share name or name:path pair. Repeatable.
+.TP
+.BR "-l, --listen" " <address>"
+Listen address (default: 0.0.0.0:445).
+.TP
+.BR "-r, --readonly"
+Make share read-only.
+.TP
+.BR "--username" " <name>"
+Require authentication with this username.
+.TP
+.BR "--password" " <password>"
+Authentication password (random if omitted with --username).
+.TP
+.BR "--expire" " <duration>"
+Auto-shutdown after duration (for example: 30m, 1h, 2h30m).
+.TP
+.BR "-v, --verbose"
+Show activity logs. Use -vv for extended logs and -vvv for full trace.
+.TP
+.BR "--trace"
+Enable full protocol trace (equivalent to -vvv).
+.TP
+.BR "--hide-dotfiles"
+Hide files starting with '.' from listings.
+.TP
+.BR "-d, --daemon"
+Run in background. Stop with
+.B sambam stop
+.
+.TP
+.BR "-p, --pidfile" " <path>"
+PID file path (default: /tmp/sambam.pid).
+.TP
+.BR "-L, --logfile" " <path>"
+Log file path.
+.TP
+.BR "-V, --version"
+Show version and exit.
+.TP
+.BR "-h, --help"
+Show help and exit.
+.SH EXAMPLES
+.TP
+Share current directory:
+.B sambam
+.TP
+Share a specific directory:
+.B sambam /path/to/folder
+.TP
+Share read-only:
+.B sambam -r /data
+.TP
+Run as daemon:
+.B sambam -d /data
+.br
+.B sambam stop
+.SH FILES
+.TP
+.I /etc/sambamrc
+System-wide configuration.
+.TP
+.I ~/.sambamrc
+User configuration.
+.TP
+.I ./.sambamrc
+Project-local overrides.
+.SH EXIT STATUS
+Returns 0 on success, non-zero on error.
+.SH SEE ALSO
+.BR mount.cifs (8),
+.BR smbclient (1)

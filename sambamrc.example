@@ -1,5 +1,5 @@
 # sambam configuration file
-# Place this file at ~/.sambamrc
+# Place this file at /etc/sambamrc, ~/.sambamrc, or ./.sambamrc
 # CLI flags override these settings.
 
 # Listen address (default: 0.0.0.0:445)

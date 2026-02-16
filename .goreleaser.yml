@@ -1,0 +1,114 @@
+version: 2
+
+project_name: sambam
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: sambam-linux
+    main: ./
+    binary: sambam
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    goarm:
+      - "6"
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+  - id: sambam-cross
+    main: ./
+    binary: sambam
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: binaries
+    ids:
+      - sambam-linux
+      - sambam-cross
+    name_template: >-
+      {{ .ProjectName }}-{{ .Os }}-
+      {{- if eq .Arch "amd64" }}amd64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else if eq .Arch "arm" }}armv{{ .Arm }}
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - README.md
+      - sambamrc.example
+      - man/sambam.1
+      - completions/sambam.bash
+      - completions/sambam.fish
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+nfpms:
+  - id: linux-packages
+    package_name: sambam
+    ids:
+      - sambam-linux
+    formats:
+      - deb
+      - rpm
+      - apk
+      - archlinux
+    bindir: /usr/bin
+    section: utils
+    priority: optional
+    maintainer: sambam maintainers
+    description: Instant SMB/CIFS file sharing for Windows, macOS, and Linux.
+    license: MIT
+    contents:
+      - src: ./completions/sambam.bash
+        dst: /usr/share/bash-completion/completions/sambam
+      - src: ./completions/sambam.fish
+        dst: /usr/share/doc/sambam/completions/sambam.fish
+      - src: ./sambamrc.example
+        dst: /usr/share/doc/sambam/sambamrc.example
+      - src: ./man/sambam.1
+        dst: /usr/share/man/man1/sambam.1
+    scripts:
+      postinstall: ./packaging/postinstall.sh
+      postremove: ./packaging/postremove.sh
+
+release:
+  github:
+    owner: sambam
+    name: sambam
+  draft: false
+  prerelease: auto
+
+snapshot:
+  version_template: "{{ incpatch .Version }}"

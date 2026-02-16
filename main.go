@@ -31,7 +31,7 @@ type Share struct {
 	Path string
 }
 
-// Config represents the ~/.sambamrc configuration file
+// Config represents sambam configuration values loaded from rc files.
 type Config struct {
 	Listen       string            `toml:"listen"`
 	Readonly     bool              `toml:"readonly"`
@@ -49,11 +49,13 @@ type Config struct {
 }
 
 type ConfigLoadInfo struct {
-	HomePath    string
-	HomeLoaded  bool
-	LocalPath   string
-	LocalLoaded bool
-	SettingSrc  map[string]string
+	SystemPath   string
+	SystemLoaded bool
+	HomePath     string
+	HomeLoaded   bool
+	LocalPath    string
+	LocalLoaded  bool
+	SettingSrc   map[string]string
 }
 
 func decodeConfigFile(path string) (*Config, toml.MetaData, error) {
@@ -206,50 +208,52 @@ func configValueString(cfg *Config, key string) string {
 	return "<unknown>"
 }
 
-// loadConfig loads configuration from ~/.sambamrc and overlays ./.sambamrc.
+// loadConfig loads configuration in order:
+// /etc/sambamrc -> ~/.sambamrc -> ./.sambamrc
 func loadConfig() (*Config, ConfigLoadInfo) {
 	var merged Config
 	hasConfig := false
 	info := ConfigLoadInfo{
-		HomePath:  filepath.Join(os.Getenv("HOME"), ".sambamrc"),
-		LocalPath: ".sambamrc",
+		SystemPath: "/etc/sambamrc",
+		HomePath:   filepath.Join(os.Getenv("HOME"), ".sambamrc"),
+		LocalPath:  ".sambamrc",
 		SettingSrc: map[string]string{},
 	}
 
-	// Load user config as base.
+	loadLayer := func(path, src string, setLoaded func()) {
+		if _, err := os.Stat(path); err != nil {
+			return
+		}
+		cfg, md, err := decodeConfigFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Error reading %s: %v\n", path, err)
+			return
+		}
+		if !hasConfig {
+			merged = *cfg
+			hasConfig = true
+		} else {
+			applyConfigOverrides(&merged, cfg, md)
+		}
+		setLoaded()
+		recordConfigSources(&info, md, src, cfg)
+	}
+
+	// Base: system config.
+	loadLayer(info.SystemPath, "system", func() {
+		info.SystemLoaded = true
+	})
+
+	// Overlay: user config.
 	home, err := os.UserHomeDir()
 	if err == nil {
 		configPath := filepath.Join(home, ".sambamrc")
 		info.HomePath = configPath
-		if _, err := os.Stat(configPath); err == nil {
-			cfg, md, err := decodeConfigFile(configPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: Error reading %s: %v\n", configPath, err)
-			} else {
-				merged = *cfg
-				hasConfig = true
-				info.HomeLoaded = true
-				recordConfigSources(&info, md, "home", cfg)
-			}
-		}
+		loadLayer(configPath, "home", func() { info.HomeLoaded = true })
 	}
 
-	// Overlay project-local config by explicit keys only.
-	if _, err := os.Stat(".sambamrc"); err == nil {
-		cfg, md, err := decodeConfigFile(".sambamrc")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Error reading .sambamrc: %v\n", err)
-		} else if !hasConfig {
-			merged = *cfg
-			hasConfig = true
-			info.LocalLoaded = true
-			recordConfigSources(&info, md, "local", cfg)
-		} else {
-			applyConfigOverrides(&merged, cfg, md)
-			info.LocalLoaded = true
-			recordConfigSources(&info, md, "local", cfg)
-		}
-	}
+	// Overlay: project-local config.
+	loadLayer(info.LocalPath, "local", func() { info.LocalLoaded = true })
 
 	if !hasConfig {
 		return nil, info
@@ -300,7 +304,7 @@ func generatePassword(length int) string {
 }
 
 var (
-	version = "1.4.13"
+	version = "1.4.14"
 )
 
 func main() {
@@ -450,10 +454,18 @@ func main() {
 			return
 		}
 		configLogsPrinted = true
-		if configInfo.HomeLoaded || configInfo.LocalLoaded {
-			logrus.Infof("config: home=%t (%s), local=%t (%s)", configInfo.HomeLoaded, configInfo.HomePath, configInfo.LocalLoaded, configInfo.LocalPath)
+		if configInfo.SystemLoaded || configInfo.HomeLoaded || configInfo.LocalLoaded {
+			logrus.Infof(
+				"config: system=%t (%s), home=%t (%s), local=%t (%s)",
+				configInfo.SystemLoaded, configInfo.SystemPath,
+				configInfo.HomeLoaded, configInfo.HomePath,
+				configInfo.LocalLoaded, configInfo.LocalPath,
+			)
 		} else {
-			logrus.Infof("config: no config file loaded (checked %s and %s)", configInfo.HomePath, configInfo.LocalPath)
+			logrus.Infof(
+				"config: no config file loaded (checked %s, %s, %s)",
+				configInfo.SystemPath, configInfo.HomePath, configInfo.LocalPath,
+			)
 		}
 		if *verbose >= 2 && len(configInfo.SettingSrc) > 0 {
 			keys := make([]string, 0, len(configInfo.SettingSrc))

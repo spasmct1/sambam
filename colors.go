@@ -2,8 +2,6 @@ package main
 
 import (
 	"os"
-
-	"golang.org/x/sys/unix"
 )
 
 // ANSI escape codes for terminal colors
@@ -22,8 +20,11 @@ var colorEnabled = isTerminal()
 
 // isTerminal checks if stdout is a terminal
 func isTerminal() bool {
-	_, err := unix.IoctlGetTermios(int(os.Stdout.Fd()), unix.TCGETS)
-	return err == nil
+	info, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
 // DisableColors disables colored output (useful for daemon mode)

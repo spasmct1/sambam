@@ -34,7 +34,7 @@ Done. They open `\\your-ip\share` in Explorer. Files are flowing. You're a hero.
 - **Optional authentication** - Require username/password when you need it
 - **Multiple shares** - Share multiple directories with different names
 - **Auto-expire** - Automatically stop sharing after a set time
-- **Config file** - Layered config from `~/.sambamrc` and `./.sambamrc`
+- **Config file** - Layered config from `/etc/sambamrc`, `~/.sambamrc`, and `./.sambamrc`
 - **Cross-platform clients** - Works with Windows 10/11, macOS, and Linux (CIFS mount)
 - **SMB 2.1 / 3.0 / 3.1.1** - Compatible with modern SMB protocol versions, including POSIX extensions
 - **Single binary** - Runs on any Linux distribution (Debian, Ubuntu, OpenWrt, etc.)
@@ -53,6 +53,34 @@ Or build from source:
 
 ```bash
 go build -o sambam .
+```
+
+### Bash completion
+
+Load completion for the current shell:
+
+```bash
+source completions/sambam.bash
+```
+
+Install system-wide (Linux):
+
+```bash
+sudo install -D -m 0644 completions/sambam.bash /etc/bash_completion.d/sambam
+```
+
+### Fish completion
+
+Load completion for the current shell:
+
+```fish
+source completions/sambam.fish
+```
+
+Install for current user:
+
+```bash
+install -D -m 0644 completions/sambam.fish ~/.config/fish/completions/sambam.fish
 ```
 
 ## Quick Start
@@ -170,20 +198,26 @@ Show help and exit.
 
 sambam reads configuration in this order:
 
-1. Base config: `~/.sambamrc` (if present)
-2. Local overrides: `./.sambamrc` (if present)
+1. Base config: `/etc/sambamrc` (if present)
+2. User overrides: `~/.sambamrc` (if present)
+3. Local overrides: `./.sambamrc` (if present)
 
 Local config overrides only the keys explicitly set in `./.sambamrc`.
-For `[shares]`, entries are merged by share name (local entries override same-name entries from home config).
+For `[shares]`, entries are merged by share name (later layers override same-name entries from earlier layers).
 
 Finally, CLI flags override config values.
 
-Example `~/.sambamrc` + `./.sambamrc` layering:
+Example `/etc/sambamrc` + `~/.sambamrc` + `./.sambamrc` layering:
+
+```toml
+# /etc/sambamrc
+listen = "10.23.22.12:445"
+readonly = false
+```
 
 ```toml
 # ~/.sambamrc
 listen = "10.23.22.13:445"
-readonly = false
 ```
 
 ```toml
@@ -191,7 +225,7 @@ readonly = false
 readonly = true
 ```
 
-Result: `listen` comes from home config, `readonly` comes from local config.
+Result: `listen` comes from user config, `readonly` comes from local config.
 
 Example configuration file (TOML):
 
@@ -243,7 +277,7 @@ sambam -v
 You will see a line like:
 
 ```text
-config: home=true (/root/.sambamrc), local=true (.sambamrc)
+config: system=true (/etc/sambamrc), home=true (/root/.sambamrc), local=true (.sambamrc)
 ```
 
 ## Connecting from Windows
