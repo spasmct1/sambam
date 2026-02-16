@@ -392,15 +392,17 @@ Then connect from Windows using `\\172.x.x.x\share` (the WSL IP).
 
 ## Known Issues
 
+These notes apply to the **sambam server** (the application serving files), not to client applications (Windows Explorer, macOS Finder, Linux mount tools, etc.).
+
 ### Platform-Specific Notes
 
 **Linux** - Fully stable. All features working including POSIX extensions, file permissions, and advanced operations.
 
 **macOS (Apple Silicon)** - Excellent support. Thoroughly tested and works as reliably as Linux. All features including POSIX extensions fully functional. No known issues.
 
-**Windows** - Experimental build
+**Windows** - Experimental server build
 - No POSIX extensions support (limitations on Unix-style permissions)
-- File deletion issues: Files cannot be deleted while the daemon is running (Windows file locking behavior)
+- File deletion issues: Files cannot be deleted while the server is running (Windows file locking behavior)
 - Other features work correctly
 
 ## Security Notice
